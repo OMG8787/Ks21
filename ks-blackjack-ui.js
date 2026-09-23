@@ -32,7 +32,7 @@
       decks: store.get(K('decks'), 5),
       counts: store.get(K('counts'), null),
       pen: store.get(K('pen'), 75),
-      shuffleMode: store.get(K('shuffle'), 'shoe'),
+      shuffleMode: store.get(K('shuffle_v2'), 'round'), // 預設：每局洗牌
       countSystem: store.get('ks_count_system', 'hilo'),
       boostSeq: store.get('ks_boost_sequence_v1', [300, 500, 800, 1200, 1800, 2700, 4000, 6000]),
       ramp: store.get(K('ramp'), '0:1,1:1,2:2,3:4,4:8,5:12'),
@@ -53,6 +53,7 @@
       if (sheetRes.seq.length) S.boostSeq = sheetRes.seq.slice();
     }
     const DEF_STRAT = S.sheet ? 'sheet' : 'ks';
+    let penInput = null; // 切牌卡輸入框（勾選每局洗牌時停用）
 
     const saveRules = () => { const r = Object.assign({}, S.rules); delete r.name; store.set(K('rules'), r); updateHeader(); };
     const saveUser = () => { store.set(K('strats'), S.user.map(u => BJ.exportStrategy(u.s, { id: u.id }))); refreshStratSelects(); };
@@ -100,9 +101,9 @@
       const R = S.rules;
       const tot = KS.RANKS.reduce((a, r) => a + (S.counts[r] || 0), 0);
       header.innerHTML = [
-        `牌靴 ${tot} 張`, R.dealerHitSoft17 ? '莊家軟17補牌' : '莊家軟17停牌',
+        `牌靴 ${tot} 張`, S.shuffleMode === 'round' ? '每局洗牌' : `發到 ${S.pen}% 洗牌`, R.dealerHitSoft17 ? '莊家軟17補牌' : '莊家軟17停牌',
         `BJ 賠 ${R.bjPayout}`, R.dealer22Push ? '莊22平手' : '', R.dealerBJOriginalOnly ? '莊BJ只輸原注' : '',
-        R.freeDouble ? '9/10/11免費加倍' : '', R.evenMoney ? '可先收1倍' : '', R.any21Wins ? '21點必勝' : '',
+        R.freeDouble ? '9/10/11免費加倍' : '', R.freeSplit ? '分牌免費' : '', R.evenMoney ? '可先收1倍' : '', R.any21Wins ? '21點必勝' : '',
         R.bonus777 ? '777/678獎金' : '', `分牌最多 ${R.maxHands} 手`,
         { any2: '兩張可投降', first: '僅第一動作可投降', none: '不可投降' }[R.surrender],
         R.surrenderAfterDouble ? '加倍後可投降' : ''
@@ -137,6 +138,13 @@
       function renderRules() {
         rulesBox.innerHTML = '';
         rulesBox.appendChild(h('h3', { text: '遊戲規則' }));
+        const shufChk = h('input', { type: 'checkbox', checked: S.shuffleMode === 'round', onchange: () => {
+          S.shuffleMode = shufChk.checked ? 'round' : 'shoe';
+          store.set(K('shuffle_v2'), S.shuffleMode);
+          if (penInput) penInput.disabled = shufChk.checked;
+          updateHeader();
+        } });
+        rulesBox.appendChild(h('div', { class: 'row' }, h('label', null, shufChk, ' 每局結束後，將桌上的牌放回牌池重新洗牌（取消勾選 = 牌不放回，發到切牌卡才洗；要練算牌請取消勾選）')));
         BJ.RULE_FIELDS.forEach(([key, type, label]) => {
           let input;
           if (type === 'bool') input = h('input', { type: 'checkbox', checked: !!S.rules[key], onchange: () => { S.rules[key] = input.checked; saveRules(); } });
@@ -145,7 +153,7 @@
           rulesBox.appendChild(h('div', { class: 'row' }, h('label', null, input, ' ' + label)));
         });
         rulesBox.appendChild(h('div', { class: 'row' },
-          h('button', { class: 'btn-ghost', text: `還原「${P.name}」預設規則`, onclick: () => { S.rules = Object.assign({}, P); saveRules(); renderRules(); } })));
+          h('button', { class: 'btn-ghost', text: `還原「${P.name}」預設規則`, onclick: () => { S.rules = Object.assign({}, P); S.shuffleMode = 'round'; store.set(K('shuffle_v2'), 'round'); if (penInput) penInput.disabled = true; saveRules(); renderRules(); } })));
       }
       renderRules();
       pane.appendChild(rulesBox);
@@ -166,8 +174,9 @@
       ed.decksInput.addEventListener('change', () => { S.decks = parseInt(ed.decksInput.value, 10) || 1; store.set(K('decks'), S.decks); });
 
       const pen = h('input', { type: 'number', min: 10, max: 100, value: S.pen, onchange: () => { S.pen = Math.min(100, Math.max(10, +pen.value || 75)); store.set(K('pen'), S.pen); } });
-      const shuf = sel([['shoe', '發到切牌卡才洗牌（算牌必選）'], ['round', '每局重新洗牌']], S.shuffleMode, v => { S.shuffleMode = v; store.set(K('shuffle'), v); });
-      deckBox.appendChild(h('div', { class: 'row' }, '洗牌方式', shuf, '　切牌卡位置（發到幾 % 洗牌）', pen, '%'));
+      pen.disabled = S.shuffleMode === 'round';
+      penInput = pen;
+      deckBox.appendChild(h('div', { class: 'row' }, '切牌卡位置（沒有勾選「每局洗牌」時，發到幾 % 洗牌）', pen, '%'));
 
       const sysSel = sel(Object.keys(KS.COUNT_SYSTEMS).map(k => [k, KS.COUNT_SYSTEMS[k].name]), S.countSystem, v => { S.countSystem = v; store.set('ks_count_system', v); renderTags(); });
       const tagBox = h('div', { class: 'row' });
@@ -326,7 +335,7 @@
 
     function fmtLog(e) {
       const hands = e.seats.map((s, i) => `玩家${i + 1} 注${s.bet}：` + s.hands.map(x =>
-        `[${x.cards.join(' ')}]=${x.total}${x.actions.length ? ' ' + x.actions.map(a => BJ.ACTION_LABEL[a] || a).join('→') : ''}${x.free ? '(免費)' : ''} ` +
+        `[${x.cards.join(' ')}]=${x.total}${x.actions.length ? ' ' + x.actions.map(a => BJ.ACTION_LABEL[a] || a).join('→') : ''}${x.free ? '(免費)' : ''}${x.freeSplit ? '[免費手]' : ''} ` +
         `<span class="res-${x.result}" style="color:${x.result === 'W' ? '#1a8f4c' : x.result === 'L' ? '#c43c3c' : '#8a6d00'}">${RES_LABEL[x.result] || ''}${x.note ? '(' + ui.esc(x.note) + ')' : ''} ${ui.signed(x.profit, 0)}</span>`
       ).join('；') + `　<b>合計 ${ui.signed(s.net, 0)}</b>`).join('<br>');
       const dOut = e.dealerOutcome ? OUT_LABEL[e.dealerOutcome] || e.dealerOutcome : '未補完';
@@ -431,7 +440,7 @@
         });
         hist.push({
           round: roundNo, tc: rd.tcAtBet || 0, rc: counter.rc, dealer: rd.dealer.map(KS.cardText), dealerTotal: BJ.handTotal(rd.dealer), dealerBJ: rd.dealerBJ, dealerOutcome: rd.dealerOutcome(),
-          seats: rd.seats.map(s => ({ bet: s.bet, net: s.net, result: s.result, hands: s.hands.map(x => ({ cards: x.cards.map(KS.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble })) }))
+          seats: rd.seats.map(s => ({ bet: s.bet, net: s.net, result: s.result, hands: s.hands.map(x => ({ cards: x.cards.map(KS.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble, freeSplit: x.freeSplit })) }))
         });
         if (hist.length > 2000) hist.shift();
       }
@@ -450,7 +459,7 @@
         const res = x.result ? ` <span class="res-${x.result}">${RES_LABEL[x.result]} ${ui.signed(x.profit, 0)}${x.note ? '（' + ui.esc(x.note) + '）' : ''}</span>` : '';
         const tags = [x.isBJ ? 'BJ' : '', x.doubled ? (x.freeDouble ? '免費加倍' : '加倍') : '', x.surrendered ? '投降' : '', x.bust ? '爆牌' : '', x.fromSplit ? '分牌' : ''].filter(Boolean).join('・');
         return `<div class="hand${active ? ' active' : ''}">${x.cards.map(c => ui.cardHtml(c)).join('')}
-          <div class="sum">${t.soft && t.total < 21 ? '軟' : ''}${t.total}${tags ? '・' + tags : ''}　注 ${x.stake}${res}</div></div>`;
+          <div class="sum">${t.soft && t.total < 21 ? '軟' : ''}${t.total}${tags ? '・' + tags : ''}　${x.freeSplit ? `免費手（輸不扣、贏 ${x.win}）` : `注 ${x.stake}${x.win !== x.stake ? '，贏 ' + x.win : ''}`}${res}</div></div>`;
       }
 
       function render() {
@@ -477,7 +486,7 @@
         // 動作按鈕
         actions.innerHTML = '';
         const L = cur ? rd.legal(cur.hand, cur.seat) : {};
-        const btns = [['hit', '要牌 H'], ['stand', '停牌 S'], ['double', L.doubleFree ? '免費加倍 D' : '加倍 D'], ['split', '分牌 P'], ['surrender', '投降 R'], ['even', '先收1倍 E'], ['wait', '等莊家 W']];
+        const btns = [['hit', '要牌 H'], ['stand', '停牌 S'], ['double', L.doubleFree ? '免費加倍 D' : S.rules.freeDouble ? '自費加倍 D' : '加倍 D'], ['split', '分牌 P'], ['surrender', '投降 R'], ['even', '先收1倍 E'], ['wait', '等莊家 W']];
         btns.forEach(([a, lab]) => {
           if ((a === 'even' || a === 'wait') && !L.even) return;
           if (L.even && a !== 'even' && a !== 'wait') return;
@@ -496,7 +505,8 @@
             <div class="stat"><b>${counter.rc}</b><span>Running Count（${KS.COUNT_SYSTEMS[counter.key].name}）</span></div>
             <div class="stat"><b>${tc.toFixed(2)}</b><span>True Count</span></div>
             <div class="stat"><b>${ui.pct(shoe.bigSmall().big, shoe.size(), 1)}</b><span>下一張是大牌的機率</span></div>
-            <div class="stat"><b>${(shoe.dealt / shoe.total * 100).toFixed(0)}%</b><span>已發出（切牌卡 ${S.pen}%）</span></div></div>`;
+            <div class="stat"><b>${(shoe.dealt / shoe.total * 100).toFixed(0)}%</b><span>${S.shuffleMode === 'round' ? '本局已發出（每局洗牌）' : '已發出（切牌卡 ' + S.pen + '%）'}</span></div></div>` +
+            (S.shuffleMode === 'round' ? '<small class="muted">每局洗牌：每局開始時牌全部放回，RC/TC 歸零，只反映本局發出的牌。</small>' : '');
           const as = getStrat(advStrat.value);
           if (as.segmented) {
             const idx = counter.index(shoe.size());
@@ -514,7 +524,7 @@
             inf += `<div class="hint">📋 ${ui.esc(libEntry(advStrat.value).name)}${sg ? '［' + ui.esc(sg.name) + '］' : ''} 建議：<b>${BJ.ACTION_LABEL[adv]}</b></div>`;
           }
           if (cEV.checked) {
-            const ev = BJ.evaluate(cur.hand.cards, rd.dealer[0], shoe.remaining10(), S.rules, L, { fromAA: cur.hand.fromAA });
+            const ev = BJ.evaluate(cur.hand.cards, rd.dealer[0], shoe.remaining10(), S.rules, L, { fromAA: cur.hand.fromAA, freeSplitHand: cur.hand.freeSplit });
             inf += `<div class="table-wrap"><table><tr><th>動作</th><th>EV(每原注)</th><th>勝</th><th>和</th><th>輸</th></tr>` +
               ['stand', 'hit', 'double', 'split', 'surrender', 'even', 'wait'].filter(k => ev[k] && L[k]).map(k => {
                 const v = ev[k];
@@ -749,7 +759,7 @@
         stage.innerHTML = `<h4>莊家明牌</h4>${ui.cardHtml(q.up)}<h4>你的牌（${info.soft ? '軟' : q.type === 'pair' ? '對子 ' : '硬'}${info.total}）</h4>${q.cards.map(c => ui.cardHtml(c)).join('')}`;
         btns.innerHTML = '';
         fb.innerHTML = '';
-        [['hit', '要牌 H'], ['stand', '停牌 S'], ['double', q.L.doubleFree ? '免費加倍 D' : '加倍 D'], ['split', '分牌 P'], ['surrender', '投降 R']].forEach(([a, lab]) => {
+        [['hit', '要牌 H'], ['stand', '停牌 S'], ['double', q.L.doubleFree ? '免費加倍 D' : S.rules.freeDouble ? '自費加倍 D' : '加倍 D'], ['split', '分牌 P'], ['surrender', '投降 R']].forEach(([a, lab]) => {
           if (q.L[a]) btns.appendChild(h('button', { text: lab, onclick: () => answer(a) }));
         });
       }
@@ -864,12 +874,21 @@
       pane.appendChild(gridBox);
 
       const LABEL = { H: 'H', S: 'S', Dh: 'D', Ds: 'Ds', Rh: 'R', Rs: 'Rs', P: 'P', D: 'D', R: 'R', '-': '·', Y: '收', N: '不收' };
+      // 22點：加倍格子標示免費（硬 9/10/11 兩張）或自費
+      function cellLabel(kind, key, code) {
+        const lab = LABEL[code] || code;
+        if (!S.rules.freeDouble || code[0] !== 'D') return lab;
+        const total = kind === 'pair' ? key * 2 : key;
+        const free = (kind === 'hard' || (kind === 'pair' && key !== 11)) && total >= 9 && total <= 11;
+        return (free ? '免' : '自') + lab;
+      }
       function renderGrid() {
         const e = cur();
         const s = viewed();
         const editable = !e.builtin;
         gridBox.innerHTML = '';
-        const legend = '<small class="muted">H=要牌　S=停牌　D=可加倍就加倍否則要牌　Ds=可加倍就加倍否則停牌　R=可投降就投降否則要牌　Rs=投降否則停牌　P=分牌　·=對子不特別處理（依點數表）</small>';
+        const legend = '<small class="muted">H=要牌　S=停牌　D=可加倍就加倍否則要牌　Ds=可加倍就加倍否則停牌　R=可投降就投降否則要牌　Rs=投降否則停牌　P=分牌　·=對子不特別處理（依點數表）</small>' +
+          (S.rules.freeDouble ? '<div class="hint">💰 加倍分兩種，由點數自動決定：<b>免D</b> = 兩張硬 9/10/11 <b>免費加倍</b>（贏賠 2 倍注、輸只輸原注）；<b>自D</b> = 其他點數（硬 12 以上、軟牌 A+x、對子）<b>自費加倍</b>（放同額籌碼）。兩種都只補一張。<br>在格子填 D 就是「這手要加倍」；想要「只在免費時加倍、需要自費就不加」，在自費的格子改填 H 或 S 即可。</div>' : '');
         gridBox.appendChild(h('div', { class: 'panel' },
           h('h3', { text: `${s.name}${editable ? '（點格子切換動作）' : '（唯讀 — 請先「複製成新策略」再編輯）'}` }),
           h('div', { html: legend })));
@@ -881,14 +900,14 @@
             const tr = h('tr', null, h('th', { text: label }));
             cols.forEach(d => {
               const code = getCode(s, key, d);
-              const td = h('td', { class: `cell c-${code === 'Y' ? 'P' : code === 'N' ? '-' : code}`, text: LABEL[code] || code });
+              const td = h('td', { class: `cell c-${code === 'Y' ? 'P' : code === 'N' ? '-' : code}`, text: cellLabel(kind, key, code) });
               td.addEventListener('click', () => {
                 if (!editable) { flash('唯讀策略不能修改，請先「複製成新策略」', true); return; }
                 const cyc = C.CYCLE[kind];
                 setCode(s, key, d, cyc[(cyc.indexOf(getCode(s, key, d)) + 1) % cyc.length]);
                 saveUser();
                 const c2 = getCode(s, key, d);
-                td.className = `cell c-${c2 === 'Y' ? 'P' : c2 === 'N' ? '-' : c2}`; td.textContent = LABEL[c2] || c2;
+                td.className = `cell c-${c2 === 'Y' ? 'P' : c2 === 'N' ? '-' : c2}`; td.textContent = cellLabel(kind, key, c2);
               });
               tr.appendChild(td);
             });

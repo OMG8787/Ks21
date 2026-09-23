@@ -115,9 +115,13 @@
       return c;
     }
     // 從牌靴中抽出指定點數（固定起手牌用）；牌靴沒有這張牌時回傳 null
+    // 必須隨機挑一張：若固定從牌堆頂端找，會讓接下來發出的牌缺少這個點數（造成莊家分佈失真）
     take(rank) {
-      for (let i = this.cards.length - 1; i >= 0; i--) {
-        if (rankOf(this.cards[i]) === rank) {
+      const n = this.rem[rank] || 0;
+      if (n <= 0) return null;
+      let k = Math.floor(rand() * n);
+      for (let i = 0; i < this.cards.length; i++) {
+        if (rankOf(this.cards[i]) === rank && k-- === 0) {
           const c = this.cards.splice(i, 1)[0];
           this.rem[rank]--;
           this.dealt++;

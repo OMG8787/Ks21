@@ -32,6 +32,7 @@
     splitByValue: false,        // true：10/J/Q/K 同值即可分
     das: true,                  // 分牌後可加倍
     freeDouble: false,          // 兩張硬 9/10/11 免費加倍（22點）
+    freeSplit: false,           // 分牌免費：分出來的手贏照賠、輸不扣錢（22點）
     surrender: 'any2',          // 'any2' 任何未要牌的兩張 | 'first' 只限第一個動作 | 'none'
     surrenderAfterDouble: false // 加倍後投降
   };
@@ -49,7 +50,7 @@
     star22: Object.assign({}, BASE_RULES, {
       name: '麗星郵輪22點', dealerHitSoft17: true, evenMoney: true, bjVsDealerBJ: 'push',
       dealerBJOriginalOnly: true, dealer22Push: true, maxHands: 4, resplitAces: false,
-      splitAcesOneCard: false, das: true, freeDouble: true, surrender: 'first'
+      splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first'
     })
   };
 
@@ -74,6 +75,7 @@
     ['splitByValue', 'bool', '10/J/Q/K 同值即可分牌（關閉 = 必須同點數）'],
     ['das', 'bool', '分牌後可加倍'],
     ['freeDouble', 'bool', '兩張硬 9/10/11 免費加倍（贏賠 2 倍注、輸只輸原注，其他加倍自費）'],
+    ['freeSplit', 'bool', '分牌免費：分出來的每一手贏照賠一注、輸了不扣錢（原本那手照常輸贏）'],
     ['surrender', ['any2', 'first', 'none'], '投降：any2=任何未要牌兩張（含分牌後）；first=只限第一個動作；none=不可'],
     ['surrenderAfterDouble', 'bool', '加倍後可投降（退回原注）']
   ];
@@ -123,7 +125,7 @@
     }
     _newHand(seat, cards, extra) {
       return Object.assign({
-        cards, base: seat.bet, stake: seat.bet, winMult: 1, doubled: false, freeDouble: false,
+        cards, base: seat.bet, stake: seat.bet, win: seat.bet, doubled: false, freeDouble: false, freeSplit: false,
         fromSplit: false, splitAces: false, fromAA: false, surrendered: false, bust: false,
         done: false, hitOnce: false, pendingEven: false, pendingDA: false, isBJ: false,
         actions: [], profit: 0, result: null
@@ -205,8 +207,9 @@
         case 'stand': hand.pendingDA = false; hand.done = true; break;
         case 'hit': hand.hitOnce = true; hand.cards.push(shoe.draw()); after(); break;
         case 'double': {
-          if (L.doubleFree) { hand.freeDouble = true; hand.winMult = 2; }
-          else hand.stake = hand.base * 2;
+          // 免費加倍：贏的注加一份、輸的不變；自費加倍：兩者都加一份
+          if (L.doubleFree) { hand.freeDouble = true; hand.win += hand.base; }
+          else { hand.stake += hand.base; hand.win += hand.base; }
           hand.doubled = true;
           hand.cards.push(shoe.draw());
           after();
@@ -218,6 +221,7 @@
           const isA = rankOf(hand.cards[0]) === 'A';
           const c2 = hand.cards.pop();
           const nh = this._newHand(seat, [c2], { fromSplit: true, splitAces: isA, fromAA: hand.fromAA || isA });
+          if (this.rules.freeSplit) { nh.freeSplit = true; nh.stake = 0; } // 免費分牌：輸了不扣錢
           hand.fromSplit = true; hand.splitAces = isA; hand.fromAA = hand.fromAA || isA;
           hand.cards.push(shoe.draw());
           nh.cards.push(shoe.draw());
@@ -281,12 +285,12 @@
           } else if (h.surrendered) { p = -h.stake * R.surrenderLoss; res = 'L'; h.note = '投降'; }
           else if (h.bust) { p = -h.stake; res = 'L'; h.note = '爆牌'; }
           else if (dBJ) {
-            if (R.any21Wins && t === 21) { p = h.stake * h.winMult * R.winPayout; res = 'W'; h.note = '21點必勝'; }
+            if (R.any21Wins && t === 21) { p = h.win * R.winPayout; res = 'W'; h.note = '21點必勝'; }
             else if (R.aaSplitVsBJHalf && h.fromAA && h.fromSplit && upA) { p = -h.stake * 0.5; res = 'L'; h.note = 'AA分牌對BJ輸半注'; }
             else { p = -h.stake; res = 'L'; h.note = '莊BJ'; }
           } else {
             const bonus = R.bonus777 && t === 21 && is777or678(h.cards);
-            const win = amt => { p = h.stake * h.winMult * amt; res = 'W'; };
+            const win = amt => { p = h.win * amt; res = 'W'; };
             if (bonus) { win(R.bonus777Pay); h.note = '777/678獎金'; }
             else if (d22) { p = 0; res = 'P'; h.note = '莊22平手'; }
             else if (dBust) win(R.winPayout);
@@ -578,11 +582,11 @@
 
   /**
    * 對手牌最終點數 t（未爆）面對莊家分佈 D 的結果
-   * kind: { stake (輸的倍數), winMult, bjLoss (莊 BJ 時輸的倍數), is21NotBJ }
+   * kind: { stake (輸的倍數), win (贏的倍數), bjLoss (莊 BJ 時輸的倍數) }
    */
   function standVec(t, D, R, kind) {
     const k = kind || {};
-    const stake = k.stake || 1, win = (k.winMult || 1) * stake * R.winPayout;
+    const stake = k.stake == null ? 1 : k.stake, win = (k.win == null ? stake : k.win) * R.winPayout;
     const bjLoss = k.bjLoss == null ? stake : k.bjLoss;
     const v = vec(0, 0, 0, 0);
     for (const o of OUTCOMES) {
@@ -630,7 +634,7 @@
     function playOut(sum, ace, kind) {
       const soft = ace && sum + 10 <= 21;
       const t = soft ? sum + 10 : sum;
-      if (t > 21) return vec(-(kind.stake || 1), 0, 0, 1);
+      if (t > 21) return vec(-(kind.stake == null ? 1 : kind.stake), 0, 0, 1);
       const sv = standVec(t, D, R, kind);
       if (t === 21) return sv;
       const key = sum + '|' + (ace ? 1 : 0) + '|' + kind.id + '|' + c.join(',');
@@ -654,11 +658,13 @@
       }
       return v;
     }
-    function doubleVec(sum, ace, free, fromAA) {
+    // own：這手原本自己出的注（免費分牌的手為 0）；bjOrig：「莊BJ只輸原注」時這手的損失
+    function doubleVec(sum, ace, free, fromAA, own, bjOrig) {
+      if (own == null) own = 1;
       const left = c.reduce((a, b) => a + b, 0);
       const v = vec(0, 0, 0, 0);
-      const stake = free ? 1 : 2;
-      const kind = { stake, winMult: free ? 2 : 1, bjLoss: bjLossFor(stake, fromAA) };
+      const stake = own + (free ? 0 : 1);
+      const kind = { stake, win: 2, bjLoss: R.dealerBJOriginalOnly ? (bjOrig == null ? Math.min(stake, 1) : bjOrig) : bjLossFor(stake, fromAA) };
       for (let i = 0; i < 10; i++) {
         if (!c[i]) continue;
         const p = c[i] / left;
@@ -668,47 +674,54 @@
         if (t > 21) r = vec(-stake, 0, 0, 1);
         else {
           r = standVec(t, D, R, kind);
-          if (R.surrenderAfterDouble && !free && r.ev < -1) r = vec(-1, 0, 0, 1); // 加倍後投降退回原注
+          if (R.surrenderAfterDouble && !free && r.ev < -stake * R.surrenderLoss) r = vec(-stake * R.surrenderLoss, 0, 0, 1); // 加倍後投降
         }
         vadd(v, r, p);
       }
       return v;
     }
-    const baseKind = { id: 'n', stake: 1, bjLoss: bjLossFor(1, opt.fromAA) };
+    const own0 = opt.freeSplitHand ? 0 : 1; // 目前這手是否為免費分出來的手
+    const baseKind = { id: 'n' + own0, stake: own0, win: 1, bjLoss: own0 ? bjLossFor(1, opt.fromAA) : 0 };
     const out = { D, dealerBJ: bjProb };
     out.stand = info.total > 21 ? vec(-1, 0, 0, 1) : standVec(info.total, D, R, baseKind);
     const hasAce = cards.some(x => bjValue(x) === 11);
     if (L.hit) out.hit = hitVec(info.hard, hasAce, baseKind);
-    if (L.double) out.double = doubleVec(info.hard, hasAce, !!L.doubleFree, opt.fromAA);
+    if (L.double) out.double = doubleVec(info.hard, hasAce, !!L.doubleFree, opt.fromAA, opt.freeSplitHand ? 0 : 1, opt.freeSplitHand ? 0 : 1);
     if (L.surrender) out.surrender = vec(-R.surrenderLoss, 0, 0, 1);
     if (L.split) {
       // 近似：兩手各自補一張後依最佳策略（不再分牌）
       const pc = cards[0], pv = bjValue(pc), isA = pv === 11;
       const oneCard = isA && R.splitAcesOneCard;
       const aa = isA || opt.fromAA;
-      const bjl = R.dealerBJOriginalOnly ? 0.5 : bjLossFor(1, aa);
-      const kind = { id: 's', stake: 1, bjLoss: bjl };
       const left = c.reduce((a, b) => a + b, 0);
-      const one = vec(0, 0, 0, 0);
-      for (let i = 0; i < 10; i++) {
-        if (!c[i]) continue;
-        const p = c[i] / left;
-        c[i]--;
-        const s = (isA ? 1 : pv) + VAL10[i], a = isA || i === 0;
-        const t = a && s + 10 <= 21 ? s + 10 : s;
-        let r;
-        if (oneCard) r = standVec(t, D, R, kind);
-        else {
-          r = playOut(s, a, kind);
-          if (R.das && t < 21) {
-            const free = R.freeDouble && !(a && s + 10 <= 21) && t >= 9 && t <= 11;
-            r = better(r, doubleVec(s, a, free, aa));
+      // own=1：原本那手；own=0：免費分出來的手（輸了不扣錢）
+      const splitOne = own => {
+        const bjl = own === 0 ? 0 : R.dealerBJOriginalOnly ? (R.freeSplit ? 1 : 0.5) : bjLossFor(1, aa);
+        const kind = { id: 's' + own, stake: own, win: 1, bjLoss: bjl };
+        const one = vec(0, 0, 0, 0);
+        for (let i = 0; i < 10; i++) {
+          if (!c[i]) continue;
+          const p = c[i] / left;
+          c[i]--;
+          const s = (isA ? 1 : pv) + VAL10[i], a = isA || i === 0;
+          const t = a && s + 10 <= 21 ? s + 10 : s;
+          let r;
+          if (oneCard) r = standVec(t, D, R, kind);
+          else {
+            r = playOut(s, a, kind);
+            if (R.das && t < 21) {
+              const free = R.freeDouble && !(a && s + 10 <= 21) && t >= 9 && t <= 11;
+              r = better(r, doubleVec(s, a, free, aa, own, bjl));
+            }
           }
+          vadd(one, r, p);
+          c[i]++;
         }
-        vadd(one, r, p);
-        c[i]++;
-      }
-      out.split = vec(one.ev * 2, one.w, one.p, one.l);
+        return one;
+      };
+      const first = splitOne(1);
+      const second = R.freeSplit ? splitOne(0) : first;
+      out.split = vec(first.ev + second.ev, first.w, first.p, first.l);
     }
     if (L.even) {
       out.even = vec(1, 1, 0, 0);
@@ -745,6 +758,8 @@
     const v2i = v => (v === 11 || v === 1 ? 0 : v === 10 ? 9 : v - 1);
     const i2r = i => (i === 0 ? 'A' : i === 9 ? '10' : String(i + 1));
     const L2 = { hit: true, stand: true, double: true, surrender: R.surrender !== 'none', doubleFree: false };
+    const evTable = { hard: {}, soft: {}, pair: {} };
+    const evOf = e => { const o = {}; ['stand', 'hit', 'double', 'surrender', 'split'].forEach(k => { if (e[k]) o[k] = e[k].ev; }); return o; };
     DEALER_VALS.forEach(d => {
       const upI = v2i(d);
       const base = full.slice(); if (base[upI] > 0) base[upI]--;
@@ -763,6 +778,7 @@
         const rep = hardRep[t];
         const freeD = R.freeDouble && t >= 9 && t <= 11;
         const e = calc(rep.map(v => v), Object.assign({}, L2, { doubleFree: freeD, hit: t < 21, double: t < 21 }));
+        evTable.hard[t + '|' + d] = evOf(e);
         const hs = e.hit && e.hit.ev > e.stand.ev ? 'hit' : 'stand';
         (hs === 'hit' ? s.hitMap : s.standMap)[d].push(t);
         if (e.double && e.double.ev > Math.max(e.stand.ev, e.hit ? e.hit.ev : -9)) s.hardDoubleMap[d].push(t);
@@ -776,17 +792,21 @@
       for (let x = 2; x <= 10; x++) {
         const t = 11 + x;
         const e = calc([11, x], Object.assign({}, L2, { hit: t < 21, double: t < 21, surrender: false }));
+        evTable.soft[t + '|' + d] = evOf(e);
         if (e.hit && e.hit.ev > e.stand.ev) s.softHitMap[d].push(t);
         if (e.double && e.double.ev > Math.max(e.stand.ev, e.hit ? e.hit.ev : -9)) s.softDoubleMap[d].push(t);
       }
       // 對子
       for (let pv = 2; pv <= 11; pv++) {
         const e = calc([pv, pv], Object.assign({}, L2, { split: true, doubleFree: R.freeDouble && pv * 2 >= 9 && pv * 2 <= 11 }), { fromAA: pv === 11 });
+        evTable.pair[pv + '|' + d] = evOf(e);
         const others = ['stand', 'hit', 'double', 'surrender'].filter(k => e[k]).map(k => e[k].ev);
         if (e.split && e.split.ev > Math.max(...others)) s.pairRulesMap[d].split.push(pv);
       }
     });
-    return normalizeStrategy(s);
+    const outS = normalizeStrategy(s);
+    outS.ev = evTable; // 每一格各動作的 EV（供參考表使用）
+    return outS;
   }
 
   /* ---------------- 模擬器 ---------------- */
@@ -906,7 +926,7 @@
         dealer: rd.dealer.map(KS.cardText), dealerTotal: handTotal(rd.dealer), dealerBJ: rd.dealerBJ, dealerOutcome: rd.dealerOutcome(),
         seats: rd.seats.map(s => ({
           bet: s.bet, net: s.net, result: s.result,
-          hands: s.hands.map(h => ({ cards: h.cards.map(KS.cardText), total: handTotal(h.cards), actions: h.actions.slice(), result: h.result, profit: h.profit, note: h.note || '', stake: h.stake, free: h.freeDouble }))
+          hands: s.hands.map(h => ({ cards: h.cards.map(KS.cardText), total: handTotal(h.cards), actions: h.actions.slice(), result: h.result, profit: h.profit, note: h.note || '', stake: h.stake, free: h.freeDouble, freeSplit: h.freeSplit }))
         }))
       };
     }

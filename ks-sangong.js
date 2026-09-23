@@ -265,7 +265,7 @@
       counts: store.get('ks_sg_counts', KS.standardCounts(1)),
       decks: store.get('ks_sg_decks', 1),
       pen: store.get('ks_sg_pen', 75),
-      shuffleMode: store.get('ks_sg_shuffle', 'round'),
+      shuffleMode: store.get('ks_sg_shuffle_v2', 'round'), // 預設：每局洗牌
       seq: store.get('ks_sg_seq', [500, 700, 900, 1400, 2000, 2900, 5000])
     };
     const clsNum = n => (n > 1e-9 ? 'pos' : n < -1e-9 ? 'neg' : '');
@@ -309,7 +309,14 @@
       });
       ed.decksInput.addEventListener('change', () => { S.decks = +ed.decksInput.value || 1; store.set('ks_sg_decks', S.decks); });
       const pen = h('input', { type: 'number', min: 10, max: 100, value: S.pen, onchange: () => { S.pen = Math.min(100, Math.max(10, +pen.value || 75)); store.set('ks_sg_pen', S.pen); } });
-      deckBox.appendChild(h('div', { class: 'row' }, '洗牌方式', sel([['round', '每局洗牌'], ['shoe', '發到切牌卡才洗']], S.shuffleMode, v => { S.shuffleMode = v; store.set('ks_sg_shuffle', v); }), '切牌卡', pen, '%'));
+      pen.disabled = S.shuffleMode === 'round';
+      const shufChk = h('input', { type: 'checkbox', checked: S.shuffleMode === 'round', onchange: () => {
+        S.shuffleMode = shufChk.checked ? 'round' : 'shoe';
+        store.set('ks_sg_shuffle_v2', S.shuffleMode);
+        pen.disabled = shufChk.checked;
+      } });
+      deckBox.appendChild(h('div', { class: 'row' }, h('label', null, shufChk, ' 每局結束後，將桌上的牌放回牌池重新洗牌（取消勾選 = 牌不放回，發到切牌卡才洗；要練算牌請取消勾選）')));
+      deckBox.appendChild(h('div', { class: 'row' }, '切牌卡位置（沒有勾選「每局洗牌」時，發到幾 % 洗牌）', pen, '%'));
       pane.appendChild(deckBox);
     })(tabs.panes.rules);
 
