@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🃏 KS 牌桌模擬器</title>
+  <link rel="stylesheet" href="ks-common.css" />
+  <style>
+    .wrap { max-width: 980px; margin: 0 auto; }
+    .login { max-width: 380px; margin: 40px auto; }
+    .login input { width: 100%; margin: 6px 0 12px; }
+    .games { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+    .game { display: block; text-decoration: none; color: inherit; background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 1px 4px rgba(0, 0, 0, .08); border: 2px solid transparent; transition: border-color .15s, transform .1s; }
+    .game:hover { border-color: var(--accent); transform: translateY(-2px); }
+    .game .icon { font-size: 34px; }
+    .game h3 { margin: 6px 0; }
+    .game small { display: block; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap" id="app"></div>
+  <script src="ks-config.js"></script>
+  <script src="ks-core.js"></script>
+  <script src="ks-blackjack.js"></script>
+  <script src="ks-auth.js"></script>
+  <script>
+    (function () {
+      const ui = KS.ui, h = ui.h, auth = KS.auth, app = ui.$('app');
+      const next = new URLSearchParams(location.search).get('next');
+      const GAMES = [
+        { key: 'british', file: 'game-british21.html', icon: '🎩', name: '英式21點', desc: '莊家軟17補牌、BJ 立即賠、21點必勝、加倍後可投降' },
+        { key: 'american', file: 'game-american21.html', icon: '🗽', name: '美式21點', desc: '莊家軟17停、最後才結算、BJ 可先收 1 倍' },
+        { key: 'star22', file: 'game-star22.html', icon: '🚢', name: '麗星郵輪22點', desc: '莊家 22 點平手、9/10/11 免費加倍、莊 BJ 只輸原注' },
+        { key: 'sangong', file: 'game-sangong.html', icon: '🀄', name: '三公', desc: '主注與特殊投注、精確勝率、逐局遊戲' }
+      ];
+
+      function renderLogin(err) {
+        app.innerHTML = '';
+        const id = h('input', { type: 'text', placeholder: 'ID', autocomplete: 'username' });
+        const pw = h('input', { type: 'password', placeholder: '密碼', autocomplete: 'current-password' });
+        const msg = h('div');
+        if (err) msg.innerHTML = `<div class="alert">${ui.esc(err)}</div>`;
+        const go = async () => {
+          if (!id.value.trim()) { msg.innerHTML = '<div class="alert">請輸入 ID</div>'; return; }
+          btn.disabled = true; btn.textContent = '登入中…'; msg.innerHTML = '';
+          try {
+            await auth.login(id.value, pw.value);
+            if (next && GAMES.some(g => g.file === next)) location.href = next; else renderMenu();
+          } catch (e) {
+            msg.innerHTML = `<div class="alert">${ui.esc(e.message === 'Failed to fetch' ? '無法連線到試算表，請檢查網路或 ks-config.js 的 apiUrl' : e.message)}</div>`;
+            btn.disabled = false; btn.textContent = '登入';
+          }
+        };
+        const btn = h('button', { text: '登入', style: { width: '100%' }, onclick: go });
+        [id, pw].forEach(x => x.addEventListener('keydown', e => { if (e.key === 'Enter') go(); }));
+        app.appendChild(h('div', { class: 'panel login' },
+          h('h1', { text: '🃏 KS 牌桌模擬器' }),
+          h('label', { text: 'ID', style: { display: 'block' } }), id,
+          h('label', { text: '密碼', style: { display: 'block' } }), pw,
+          btn, msg,
+          h('small', { class: 'muted', text: '帳號與個人策略由 Google 試算表管理，請向管理者索取。' })));
+        setTimeout(() => id.focus(), 0);
+      }
+
+      function renderMenu() {
+        app.innerHTML = '';
+        const s = auth.session();
+        app.appendChild(h('h1', { text: '🃏 KS 牌桌模擬器' }));
+        const bar = h('div', { class: 'topbar' });
+        if (!auth.enabled()) bar.appendChild(h('span', { class: 'muted', text: '本機模式：ks-config.js 尚未設定 apiUrl，不需登入，也不會讀取試算表策略。' }));
+        else {
+          bar.appendChild(h('span', { text: `👤 ${s.name}（${s.id}）` }));
+          const counts = GAMES.filter(g => g.key !== 'sangong').map(g => { const r = auth.forGame(g.key); return r ? `${g.name} ${r.rowCount} 列` : null; }).filter(Boolean);
+          bar.appendChild(h('span', { class: 'muted', text: counts.length ? '已載入策略：' + counts.join('、') : '試算表中沒有你的策略，將使用預設策略' }));
+          bar.appendChild(h('button', { class: 'btn-small', text: '🔄 重新載入試算表', onclick: async e => { e.target.disabled = true; try { await auth.refresh(); renderMenu(); } catch (x) { alert(x.message); auth.session() ? renderMenu() : renderLogin(); } } }));
+          bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: () => { auth.logout(); renderLogin(); } }));
+        }
+        app.appendChild(bar);
+        app.appendChild(h('div', { class: 'games' }, GAMES.map(g => h('a', { class: 'game', href: g.file },
+          h('div', { class: 'icon', text: g.icon }), h('h3', { text: g.name }), h('small', { class: 'muted', text: g.desc }),
+          h('small', { text: g.key === 'sangong' ? '📊 模擬　🎮 逐局遊戲' : '📊 模擬　🎮 逐牌遊戲　🧮 算牌練習　❓ 測驗' })))));
+      }
+
+      if (auth.enabled() && !auth.session()) renderLogin();
+      else if (next && GAMES.some(g => g.file === next) && auth.session()) location.replace(next);
+      else renderMenu();
+    })();
+  </script>
+</body>
+
+</html>

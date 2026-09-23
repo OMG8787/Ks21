@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🃏 美式21模擬器(2.0.0)</title>
+  <!--
+    美式21模擬器
+    --------------------------------------------------------------------------
+    2.0.0 重構（共用 ks-core.js / ks-blackjack.js / ks-blackjack-ui.js / ks-common.css）
+      - 修正：同一局莊家對每位玩家各補一次牌 → 每局只打一手莊家牌
+      - 修正：21 對 21 和局時本金被吃掉
+      - 修正：分牌後 A+10 被當成 BJ（現在只算 21 點）
+      - 修正：規則編輯器修改後模擬不會套用、匯出下載兩次、檔案視窗開兩次
+      - 修正：分牌到上限時強制要牌 → 改走一般點數策略表
+      - 修正：智慧加注遺漏 BJ / 獎金 / 莊BJ 等結果
+      - 新增：逐牌遊戲、算牌練習、測驗、策略庫、多種算牌系統、自訂牌組、連勝連輸統計
+    1.0.1
+      1. 等到最後才結算勝負，即使玩家拿到 21 點也會等莊家結束後才判定勝負
+      2. 玩家 BJ 且莊明牌 A/10 時可選擇先收 1 倍（原「保險」欄位）
+      3. AA 分牌後可投降
+    規則提示：
+    - 1. 玩家明牌 2 張，莊家明牌 1 張，玩家可要牌、加倍（兩張時，只補一張）、投降（退半注）、分牌、停牌
+    - 2. 莊家補到 17 點以上（軟 17 停）
+    - 3. 初始兩張 A+10/J/Q/K 為 BJ；分牌後的 A+10 只算 21 點
+    - 4. 爆牌不返還籌碼；贏返還 2 倍；BJ 返還 2.5 倍；投降返還 0.5 倍
+  -->
+  <link rel="stylesheet" href="ks-common.css" />
+  <script src="ks-config.js"></script>
+  <script src="ks-login-guard.js"></script>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script src="ks-core.js"></script>
+  <script src="ks-blackjack.js"></script>
+  <script src="ks-auth.js"></script>
+  <script src="ks-blackjack-ui.js"></script>
+  <script>KS.BJUI.init({ preset: 'american', mount: 'app' });</script>
+</body>
+
+</html>

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🃏 麗星郵輪22點模擬器(1.0.0)</title>
+  <!--
+    麗星郵輪 22 點
+    --------------------------------------------------------------------------
+    規則：
+    - 1. 發牌：每位玩家一張 → 莊家一張明牌 → 每位玩家第二張。莊家沒有暗牌，玩家全部結束後才發莊家第二張。
+    - 2. 依序詢問每位玩家：
+         先問是否投降（只限第一個動作，退半注，分牌後不可投降）；
+         接著 要牌／分牌／加倍／停牌。補到 21 點自動停；超過 21 點直接沒收籌碼。
+         同點數可分牌，分牌後各補一張，先處理第一組再處理下一組；AA 只能分一次（分後再拿到 A 不能再分），AA 分後可繼續要牌。
+         前兩張合計 9、10、11 可免費加倍（只補一張；贏按 2 倍注賠，輸只輸原注），其他加倍要自費放同額籌碼（只補一張）。
+    - 3. 莊家補到硬 17 或軟 18 才停。莊家最終 22 點整桌平手；超過 22 點莊家通賠；其餘比大小。
+    - 4. BJ 最大。玩家 21 點遇莊家 BJ 仍是莊家贏；莊家 BJ 時只輸原注（加倍、分牌追加的注退回）。
+         玩家 BJ 時若莊家明牌是 A/10/J/Q/K，可選擇先收 1 倍結束，或等莊家第二張：
+         莊家 BJ → 和局；不是 BJ → 當場賠 1.5 倍（所以玩家 BJ 不會碰到 22 點平手）。
+  -->
+  <link rel="stylesheet" href="ks-common.css" />
+  <script src="ks-config.js"></script>
+  <script src="ks-login-guard.js"></script>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script src="ks-core.js"></script>
+  <script src="ks-blackjack.js"></script>
+  <script src="ks-auth.js"></script>
+  <script src="ks-blackjack-ui.js"></script>
+  <script>KS.BJUI.init({ preset: 'star22', mount: 'app' });</script>
+</body>
+
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>🃏 三公機率模擬器</title>
+    <!--
+      三公機率模擬器 2.0（共用 ks-core.js / ks-sangong.js / ks-common.css）
+      修正：
+        - 順子判斷把 J/Q/K 都當 10，J-Q-K 不算順 → 改依 A-2-…-K 順序，J-Q-K、Q-K-A 都算順
+        - 特殊牌組、公牌投注中獎時沒有先扣注（多賠一注）
+        - 老虎系列改為只看自己是否 6 點（不需贏莊家），統計一致
+        - 和局被算成莊家贏（牌型勝率）
+        - 新增玩家時已輸入的下注被清空、HTML 缺少 </fieldset>
+        - 和局率用輸入框局數而非實際局數、連勝在模擬結束時未結算
+      新增：自訂牌組、逐局遊戲（精確勝率與各投注 EV）、連勝連輸、路單、信賴區間、過程檢視
+    -->
+    <link rel="stylesheet" href="ks-common.css" />
+    <script src="ks-config.js"></script>
+    <script src="ks-login-guard.js"></script>
+</head>
+
+<body>
+    <div id="app"></div>
+    <script src="ks-core.js"></script>
+    <script src="ks-auth.js"></script>
+    <script src="ks-sangong.js"></script>
+    <script>KS.SG.init({ mount: 'app' });</script>
+</body>
+
+</html>

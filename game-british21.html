@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🃏 英式21模擬器(5.0.0)</title>
+  <!--
+    英式 21 點模擬器
+    --------------------------------------------------------------------------
+    5.0.0 重構（共用 ks-core.js / ks-blackjack.js / ks-blackjack-ui.js / ks-common.css）
+      - 修正：同一局莊家對每位玩家各補一次牌，莊家統計又另外補第三次 → 每局只打一手莊家牌
+      - 修正：777/678 獎金在莊家爆牌時被當成一般贏（現在先判斷獎金）
+      - 修正：AA 分牌特殊規則沒檢查莊明牌是 A、再分牌後失效
+      - 修正：分牌後 A+10 被當成 BJ（現在只算 21 點）
+      - 修正：加倍後投降因變數未定義而永遠不會觸發
+      - 修正：規則編輯器修改後模擬不會套用、匯出下載兩次、檔案視窗開兩次
+      - 牌組「有沒有 10」改為可設定（預設維持原本 48 張、無 10）
+      - 新增：逐牌遊戲、算牌練習、測驗、策略庫、多種算牌系統、自訂牌組、連勝連輸統計
+    4.0.1 ~ 4.0.6：console 監視牌型、起始牌從牌組扣除、軟 17 補牌、先補牌判斷再停牌判斷
+    規則提示：
+    - 1. 玩家明牌 2 張，莊家明牌 1 張；可要牌、加倍、投降（退半注）、分牌、停牌、加倍後投降（退原注）、分牌後投降、分牌後加倍
+    - 2. 莊家一定要補到 17 點以上，軟 17 需再補（軟牌補到 18、硬牌補到 17）
+    - 3. 初始兩張 A+10 為 BJ；A 可當 1 或 11，不超過 21 點取最大
+    - 4. 爆牌不返還籌碼；21 點返還 2 倍；BJ 返還 2.5 倍；投降返還 0.5 倍
+    - 5. 單一玩家最多 3 組牌（分牌上限可在規則中調整）
+    - 6. 特殊規則：莊家明牌 A，玩家 AA 分牌未爆牌，莊家 BJ 時每手只輸半注
+  -->
+  <link rel="stylesheet" href="ks-common.css" />
+  <script src="ks-config.js"></script>
+  <script src="ks-login-guard.js"></script>
+</head>
+
+<body>
+  <div id="app"></div>
+  <script src="ks-core.js"></script>
+  <script src="ks-blackjack.js"></script>
+  <script src="ks-auth.js"></script>
+  <script src="ks-blackjack-ui.js"></script>
+  <script>KS.BJUI.init({ preset: 'british', mount: 'app' });</script>
+</body>
+
+</html>
