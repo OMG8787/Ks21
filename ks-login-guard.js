@@ -1,11 +1,10 @@
-// 登入檢查：未登入（或登入超過 12 小時）就回到 index.html 登入
+// 登入檢查（放在 <head>，頁面畫出來之前執行）：
+// 沒有登入金鑰 cookie 就回到 index.html 登入；有金鑰時，遊戲頁載入後會再向資料庫驗證（被踢除的裝置會被導回登入頁）
 // 需先載入 ks-config.js；apiUrl 留空時為本機模式，不檢查登入
 (function () {
     var cfg = window.KS_CONFIG || {};
     if (!cfg.apiUrl) return;
-    var s = null;
-    try { s = JSON.parse(localStorage.getItem('ks_session') || 'null'); } catch (e) { s = null; }
-    if (s && s.token && Date.now() - s.at <= 12 * 3600 * 1000) return;
+    if (/(?:^|;\s*)ks_key=[^;]+/.test(document.cookie)) return;
     var page = location.pathname.split('/').pop() || '';
     location.replace('index.html?next=' + encodeURIComponent(page));
 })();

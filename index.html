@@ -16,6 +16,10 @@
     .game .icon { font-size: 34px; }
     .game h3 { margin: 6px 0; }
     .game small { display: block; }
+    .acc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 18px; }
+    .acc-field { display: grid; gap: 4px; }
+    .acc-field input { width: 100%; }
+    .acc-field label { font-weight: 600; }
   </style>
 </head>
 
@@ -28,7 +32,9 @@
   <script>
     (function () {
       const ui = KS.ui, h = ui.h, auth = KS.auth, app = ui.$('app');
-      const next = new URLSearchParams(location.search).get('next');
+      const qs = new URLSearchParams(location.search);
+      const next = qs.get('next');
+      const kickMsg = qs.get('msg');
       const GAMES = [
         { key: 'british', file: 'game-british21.html', icon: '🎩', name: '英式21點', desc: '莊家軟17補牌、BJ 立即賠、21點必勝、加倍後可投降' },
         { key: 'american', file: 'game-american21.html', icon: '🗽', name: '美式21點', desc: '莊家軟17停、最後才結算、BJ 可先收 1 倍' },
@@ -36,10 +42,12 @@
         { key: 'sangong', file: 'game-sangong.html', icon: '🀄', name: '三公', desc: '主注與特殊投注、精確勝率、逐局遊戲' }
       ];
 
+      const goNext = () => { if (next && GAMES.some(g => g.file === next)) { location.href = next; return true; } return false; };
+
       function renderLogin(err) {
         app.innerHTML = '';
-        const id = h('input', { type: 'text', placeholder: 'ID', autocomplete: 'username' });
-        const pw = h('input', { type: 'password', placeholder: '密碼', autocomplete: 'current-password' });
+        const id = h('input', { type: 'text', id: 'login-id', placeholder: 'ID', autocomplete: 'username' });
+        const pw = h('input', { type: 'password', id: 'login-pw', placeholder: '密碼', autocomplete: 'current-password' });
         const msg = h('div');
         if (err) msg.innerHTML = `<div class="alert">${ui.esc(err)}</div>`;
         const go = async () => {
@@ -47,9 +55,9 @@
           btn.disabled = true; btn.textContent = '登入中…'; msg.innerHTML = '';
           try {
             await auth.login(id.value, pw.value);
-            if (next && GAMES.some(g => g.file === next)) location.href = next; else renderMenu();
+            if (!goNext()) renderMenu();
           } catch (e) {
-            msg.innerHTML = `<div class="alert">${ui.esc(e.message === 'Failed to fetch' ? '無法連線到試算表，請檢查網路或 ks-config.js 的 apiUrl' : e.message)}</div>`;
+            msg.innerHTML = `<div class="alert">${ui.esc(e.message)}</div>`;
             btn.disabled = false; btn.textContent = '登入';
           }
         };
@@ -57,35 +65,105 @@
         [id, pw].forEach(x => x.addEventListener('keydown', e => { if (e.key === 'Enter') go(); }));
         app.appendChild(h('div', { class: 'panel login' },
           h('h1', { text: '🃏 KS 牌桌模擬器' }),
-          h('label', { text: 'ID', style: { display: 'block' } }), id,
-          h('label', { text: '密碼', style: { display: 'block' } }), pw,
+          h('label', { text: 'ID', for: 'login-id', style: { display: 'block' } }), id,
+          h('label', { text: '密碼', for: 'login-pw', style: { display: 'block' } }), pw,
           btn, msg,
-          h('small', { class: 'muted', text: '帳號與個人策略由 Google 試算表管理，請向管理者索取。' })));
+          h('small', { class: 'muted', text: '帳號由管理者建立。登入後這台裝置會保持登入，直到你登出或管理者移除這台裝置。' })));
         setTimeout(() => id.focus(), 0);
       }
 
       function renderMenu() {
         app.innerHTML = '';
-        const s = auth.session();
         app.appendChild(h('h1', { text: '🃏 KS 牌桌模擬器' }));
         const bar = h('div', { class: 'topbar' });
-        if (!auth.enabled()) bar.appendChild(h('span', { class: 'muted', text: '本機模式：ks-config.js 尚未設定 apiUrl，不需登入，也不會讀取試算表策略。' }));
+        let account = null;
+        if (!auth.enabled()) bar.appendChild(h('span', { class: 'muted', text: '本機模式：ks-config.js 尚未設定 apiUrl，不需登入，策略只存在這台電腦。' }));
         else {
-          bar.appendChild(h('span', { text: `👤 ${s.name}（${s.id}）` }));
-          const counts = GAMES.filter(g => g.key !== 'sangong').map(g => { const r = auth.forGame(g.key); return r ? `${g.name} ${r.rowCount} 列` : null; }).filter(Boolean);
-          bar.appendChild(h('span', { class: 'muted', text: counts.length ? '已載入策略：' + counts.join('、') : '試算表中沒有你的策略，將使用預設策略' }));
-          bar.appendChild(h('button', { class: 'btn-small', text: '🔄 重新載入試算表', onclick: async e => { e.target.disabled = true; try { await auth.refresh(); renderMenu(); } catch (x) { alert(x.message); auth.session() ? renderMenu() : renderLogin(); } } }));
-          bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: () => { auth.logout(); renderLogin(); } }));
+          bar.appendChild(h('span', { text: `👤 ${auth.user.name}（${auth.user.id}${auth.roleText()}）` }));
+          bar.appendChild(h('span', { class: 'muted', text: '進入遊戲時會自動讀取你在資料庫中的策略' }));
+          if (auth.outdated()) bar.appendChild(h('span', { class: 'alert', style: { margin: 0, padding: '2px 8px' }, text: '⚠️ 資料庫程式不是最新版，請管理者重新部署' }));
+          account = renderAccount();
+          bar.appendChild(h('button', { class: 'btn-small', text: '⚙️ 帳號設定', onclick: () => { account.hidden = !account.hidden; if (!account.hidden) account.querySelector('input').focus(); } }));
+          bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: async e => { e.target.disabled = true; await auth.logout(); renderLogin(); } }));
         }
         app.appendChild(bar);
+        if (account) {
+          app.appendChild(account);
+          account.hidden = location.hash !== '#account';
+        }
         app.appendChild(h('div', { class: 'games' }, GAMES.map(g => h('a', { class: 'game', href: g.file },
           h('div', { class: 'icon', text: g.icon }), h('h3', { text: g.name }), h('small', { class: 'muted', text: g.desc }),
           h('small', { text: g.key === 'sangong' ? '📊 模擬　🎮 逐局遊戲' : '📊 模擬　🎮 逐牌遊戲　🧮 算牌練習　❓ 測驗' })))));
       }
 
-      if (auth.enabled() && !auth.session()) renderLogin();
-      else if (next && GAMES.some(g => g.file === next) && auth.session()) location.replace(next);
-      else renderMenu();
+      // 帳號設定：改名稱、ID、密碼（都要先輸入目前密碼）
+      function renderAccount() {
+        const field = (label, input, note) => h('div', { class: 'acc-field' }, h('label', { text: label, for: input.id }), input, note ? h('small', { class: 'muted', text: note }) : null);
+        const name = h('input', { type: 'text', id: 'acc-name', value: auth.user.name, maxlength: 30 });
+        const id = h('input', { type: 'text', id: 'acc-id', value: auth.user.id, maxlength: 30, autocomplete: 'username' });
+        const pw1 = h('input', { type: 'password', id: 'acc-pw1', autocomplete: 'new-password', placeholder: '不改請留空' });
+        const pw2 = h('input', { type: 'password', id: 'acc-pw2', autocomplete: 'new-password', placeholder: '再輸入一次新密碼' });
+        const cur = h('input', { type: 'password', id: 'acc-cur', autocomplete: 'current-password' });
+        const msg = h('div');
+        const save = h('button', { class: 'btn-good', text: '💾 儲存帳號設定', onclick: async () => {
+          const changes = {};
+          if (name.value.trim() !== auth.user.name) changes.newName = name.value.trim();
+          if (id.value.trim() !== auth.user.id) changes.newId = id.value.trim();
+          if (pw1.value || pw2.value) {
+            if (pw1.value !== pw2.value) { msg.innerHTML = '<div class="alert">兩次輸入的新密碼不一樣</div>'; return; }
+            if (pw1.value.length < 4) { msg.innerHTML = '<div class="alert">新密碼至少要 4 個字</div>'; return; }
+            changes.newPw = pw1.value;
+          }
+          if (!Object.keys(changes).length) { msg.innerHTML = '<div class="alert">沒有任何修改</div>'; return; }
+          if (!cur.value) { msg.innerHTML = '<div class="alert">請輸入目前的密碼</div>'; cur.focus(); return; }
+          if (changes.newId && !confirm(`確定把 ID 從「${auth.user.id}」改成「${changes.newId}」？\n你的策略、練習成績、登入裝置、玩家設定都會一起改到新 ID，之後要用新 ID 登入。`)) return;
+          save.disabled = true; msg.innerHTML = '<p class="muted">儲存中…</p>';
+          try {
+            const res = await auth.updateAccount(cur.value, changes);
+            const done = [changes.newName ? '名稱' : '', changes.newId ? `ID（共更新 ${res.moved} 筆相關資料）` : '', changes.newPw ? '密碼' : ''].filter(Boolean).join('、');
+            renderMenu();
+            const box = app.querySelector('.acc-panel');
+            box.hidden = false;
+            box.querySelector('.acc-msg').innerHTML = `<div class="okbox">✔ 已更新：${ui.esc(done)}${changes.newId ? '。下次請用新 ID「' + ui.esc(res.id) + '」登入' : ''}</div>`;
+          } catch (e) {
+            msg.innerHTML = `<div class="alert">${ui.esc(e.message)}</div>`;
+            save.disabled = false;
+          }
+        } });
+        msg.className = 'acc-msg';
+        return h('div', { class: 'panel acc-panel' },
+          h('h3', { text: '⚙️ 帳號設定', style: { marginTop: 0 } }),
+          h('div', { class: 'acc-grid' },
+            field('使用者名稱', name),
+            field('ID', id, '改 ID 後，你的策略、練習成績、登入裝置、玩家設定都會一起改到新 ID'),
+            field('新密碼', pw1, '至少 4 個字'),
+            field('確認新密碼', pw2),
+            field('目前的密碼（必填）', cur, '為了安全，任何修改都要先輸入目前的密碼')),
+          h('div', { class: 'row' }, save), msg);
+      }
+
+      function renderError(message) {
+        app.innerHTML = '';
+        app.appendChild(h('div', { class: 'panel login' },
+          h('h1', { text: '🃏 KS 牌桌模擬器' }),
+          h('div', { class: 'alert', text: message }),
+          h('button', { text: '重試', onclick: boot })));
+      }
+
+      // 啟動：有金鑰就向資料庫確認這台裝置仍被允許
+      async function boot() {
+        if (!auth.enabled()) { renderMenu(); return; }
+        if (!auth.getKey()) { renderLogin(kickMsg); return; }
+        app.innerHTML = '<div class="panel login"><p class="muted">正在向資料庫驗證登入…</p></div>';
+        try {
+          await auth.check();
+          if (!goNext()) renderMenu();
+        } catch (e) {
+          if (e.kicked) renderLogin(e.message);
+          else renderError(e.message);
+        }
+      }
+      boot();
     })();
   </script>
 </body>

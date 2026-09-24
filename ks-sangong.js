@@ -272,8 +272,9 @@
     const pct = (x, d) => (x * 100).toFixed(d == null ? 2 : d) + '%';
     const sel = (opts, v, on) => { const s = h('select', { onchange: () => on && on(s.value) }, opts.map(o => h('option', { value: o[0], text: o[1] }))); s.value = v; return s; };
 
-    // Google 試算表：三公只讀取個人的智慧下注序列
-    const sheet = KS.auth ? KS.auth.forGame('sangong') : null;
+    // 資料庫：三公只讀取個人的智慧下注序列
+    let sheet = KS.auth ? KS.auth.forGame('sangong') : null;
+    let seqInputRef = null;
     if (sheet && sheet.seq.length) S.seq = sheet.seq.slice();
     mount.innerHTML = '';
     if (KS.auth) KS.auth.topBar(mount, 'sangong');
@@ -337,6 +338,7 @@
       saved.forEach(addPlayer);
       const smart = h('input', { type: 'checkbox', checked: store.get('ks_sg_smart', false), onchange: () => store.set('ks_sg_smart', smart.checked) });
       const seq = h('input', { type: 'text', value: S.seq.join(','), style: { width: '320px' }, onchange: () => { S.seq = seq.value.split(/[,，\s]+/).map(x => parseInt(x, 10)).filter(x => x > 0); store.set('ks_sg_seq', S.seq); seq.value = S.seq.join(','); } });
+      seqInputRef = seq;
       const rounds = h('input', { type: 'number', min: 1, value: store.get('ks_sg_rounds', 100000), onchange: () => store.set('ks_sg_rounds', +rounds.value) });
       const logLimit = h('input', { type: 'number', min: 0, value: 200 });
       const bar = h('div'); const prog = h('div', { class: 'progress' }, bar); const progText = h('span', { class: 'muted' });
@@ -348,7 +350,7 @@
         h('div', { class: 'row' },
           h('button', { class: 'btn-small', text: '＋ 新增玩家', onclick: () => addPlayer() }),
           h('button', { class: 'btn-small', text: '－ 刪除最後一位', onclick: () => { if (players.length <= 1) { alert('至少需要 1 位玩家'); return; } players.pop().row.remove(); save(); } })),
-        h('div', { class: 'row' }, h('label', null, smart, '啟用智慧下注（主注：贏往下一階、輸回第一階、和局不變）'), seq, sheet && sheet.seq.length ? h('b', { text: '（由試算表指定）' }) : null),
+        h('div', { class: 'row' }, h('label', null, smart, '啟用智慧下注（主注：贏往下一階、輸回第一階、和局不變）'), seq, sheet && sheet.seq.length ? h('b', { text: '（由資料庫指定）' }) : null),
         h('div', { class: 'row' }, '模擬局數', rounds, '　記錄前', logLimit, '局過程'),
         h('div', { class: 'row' }, runBtn, stopBtn, prog, progText)));
       pane.appendChild(out);
@@ -436,6 +438,10 @@
       const info = h('div'); const stats = h('div');
       pane.appendChild(h('div', { class: 'panel' }, h('div', { class: 'row' }, '座位數', nP,
         h('button', { class: 'btn-small', text: '重新洗牌', onclick: () => { if (round && !round.done) return; newShoe(); render(); } }),
+        h('button', { class: 'btn-small', text: '重設統計', onclick: () => {
+          Object.assign(sess, { n: 0, W: 0, L: 0, P: 0, main: 0, side: 0, streak: new KS.StreakTracker(10), road: [], sideHits: {} });
+          hist.length = 0; render();
+        } }),
         h('button', { class: 'btn-small', text: '🔍 查看遊戲過程', onclick: () => ui.logViewer('遊戲過程', hist.slice().reverse().map(fmtLog)) })), betRow));
       pane.appendChild(h('div', { class: 'grid2' }, h('div', null, h('div', { class: 'panel' }, table, h('div', { class: 'actions' }, dealBtn, openBtn)), stats), info));
 
@@ -544,6 +550,12 @@
       return { render };
     })(tabs.panes.play);
 
+    if (KS.auth && KS.auth.loggedIn()) {
+      KS.auth.onReload = () => {
+        sheet = KS.auth.forGame('sangong');
+        if (sheet && sheet.seq.length) { S.seq = sheet.seq.slice(); if (seqInputRef) seqInputRef.value = S.seq.join(','); }
+      };
+    }
     const last = store.get('ks_tab_' + location.pathname, null);
     if (last && tabs.panes[last]) tabs.show(last);
   };

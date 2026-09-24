@@ -1,19 +1,23 @@
 /* ==========================================================================
-   ks-auth.js — Google 試算表登入與玩家策略
-   試算表（由 Apps Script 網頁應用程式提供 API，程式碼見 sheet/Code.gs）：
-     帳號     ：ID | 密碼 | 名稱
+   ks-auth.js — 資料庫登入與玩家策略
+   資料庫（由 Apps Script 網頁應用程式提供 API，程式碼見 sheet/Code.gs）：
+     帳號     ：ID | 密碼 | 名稱 | 狀態（啟用/停用）| 權限（填「管理者」才看得到最佳基本策略）
+     登入裝置 ：金鑰雜湊 | ID | 裝置 | 登入時間 | 最後使用（刪掉一列 = 踢掉那台裝置）
+     我的策略 ：ID | 遊戲 | 策略編號 | 策略名稱 | 策略內容 | 更新時間（網站自動寫入）
+     練習成績 ：ID | 遊戲 | 類型 | 時間 | 題數 | 答對 | 正確率 | 明細（網站自動寫入）
      玩家設定 ：ID | 遊戲 | 算牌系統 | 牌況分段 | 智慧加注序列
      玩家策略 ：ID | 遊戲 | 牌況 | 類型 | 玩家牌 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | A
-   ID 填 * 代表「所有玩家的預設」，玩家自己的列會覆蓋預設列。
+   玩家設定的 ID 填 * 代表「所有玩家的預設」；玩家策略只讀本人 ID 的列（新玩家從空白開始）。
    ========================================================================== */
 (function (root) {
   'use strict';
   const KS = root.KS || (typeof require !== 'undefined' ? require('./ks-core.js') : null);
-  const SESSION_KEY = 'ks_session';
-  const SESSION_HOURS = 12;
 
   const SHEETS = {
-    accounts: { name: '帳號', head: ['ID', '密碼', '名稱'] },
+    accounts: { name: '帳號', head: ['ID', '密碼', '名稱', '狀態', '權限'] },
+    devices: { name: '登入裝置', head: ['金鑰雜湊', 'ID', '裝置', '登入時間', '最後使用'] },
+    saved: { name: '我的策略', head: ['ID', '遊戲', '策略編號', '策略名稱', '策略內容', '更新時間'] },
+    scores: { name: '練習成績', head: ['ID', '遊戲', '類型', '時間', '題數', '答對', '正確率', '明細'] },
     settings: { name: '玩家設定', head: ['ID', '遊戲', '算牌系統', '牌況分段', '智慧加注序列'] },
     strategies: { name: '玩家策略', head: ['ID', '遊戲', '牌況', '類型', '玩家牌', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'A'] }
   };
@@ -91,7 +95,7 @@
   }
 
   /**
-   * 由試算表資料建立某遊戲的策略與設定
+   * 由資料庫資料建立某遊戲的策略與設定
    * @returns {{strategy, countSystem, segments, seq, errors, rowCount}|null}
    */
   function buildForGame(BJ, data, myId, game) {
@@ -109,115 +113,266 @@
       res.seq = parseSeq(setting['智慧加注序列']);
     }
     if (game === 'sangong') return setting ? res : null;
-    // 合併：預設(*)先，玩家自己的列覆蓋同一格
-    const merged = new Map();
-    (data.strategies || []).filter(forGame).filter(r => any(r) || mine(r)).sort((a, b) => (any(a) ? 0 : 1) - (any(b) ? 0 : 1)).forEach(r => {
-      merged.set(`${String(r['牌況'] || '基本').trim() || '基本'}|${r['類型']}|${r['玩家牌']}`, r);
-    });
-    const rows = Array.from(merged.values());
+    // 只用本人的列（* 預設列不套用）；依資料庫順序套用，同一格寫兩次以後面的為準（空白格不覆蓋）
+    const rows = (data.strategies || []).filter(forGame).filter(mine);
     res.rowCount = rows.length;
-    if (!rows.length && !setting) return null;
+    if (!rows.length) return setting ? res : null; // 資料庫沒有這位玩家的策略
     const segOf = r => String(r['牌況'] || '').trim() || '基本';
-    const base = BJ.cells.materialize(BJ.ksDefaultStrategy(game));
-    base.name = '試算表策略';
-    delete base.builtin;
+    const base = BJ.cells.materialize(BJ.blankStrategy('資料庫策略'));
     rows.filter(r => segOf(r) === '基本').forEach(r => { res.errors.push(...applyRow(BJ, base, r)); });
     const known = new Set(['基本', ...res.segments.map(s => s.name)]);
     // 玩家自己的列用到未定義的牌況才警告；預設(*)列若玩家沒有該分段就直接略過
-    rows.forEach(r => { if (mine(r) && !known.has(segOf(r))) res.errors.push(`牌況「${segOf(r)}」沒有在玩家設定的牌況分段中定義（該列被忽略）`); });
+    rows.forEach(r => { if (!known.has(segOf(r))) res.errors.push(`牌況「${segOf(r)}」沒有在玩家設定的牌況分段中定義（該列被忽略）`); });
     if (res.segments.length) {
       res.strategy = {
-        segmented: true, name: '試算表策略', base,
+        segmented: true, name: '資料庫策略', base,
         segments: res.segments.map(sg => {
           const st = BJ.cloneStrategy(base);
-          st.name = `試算表策略［${sg.name}］`;
+          st.name = `資料庫策略［${sg.name}］`;
           rows.filter(r => segOf(r) === sg.name).forEach(r => { res.errors.push(...applyRow(BJ, st, r)); });
           return Object.assign({}, sg, { strat: st });
         })
       };
     } else res.strategy = base;
+    res.missing = BJ.missingCells(res.strategy);
     return res;
   }
 
-  /* ---------------- 網頁端：登入 / session ---------------- */
+  /* ---------------- 網頁端：登入金鑰（cookie）／資料庫驗證 ----------------
+     1. 登入成功 → Google 端產生隨機金鑰，存在 cookie（ks_key）
+     2. 每次進入遊戲頁 → 帶金鑰到資料庫核對「登入裝置」工作表；被刪除的裝置會被踢回登入頁
+     3. 同一次呼叫取回該遊戲的設定、玩家策略與「我的策略」（只有自己的） */
+  const COOKIE = 'ks_key';
+  const COOKIE_DAYS = 400; // 瀏覽器允許的最長期限；每次進站都會自動延長，等同永久
   const cfg = () => (root.KS_CONFIG || {});
+  const API_VERSION = 4; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
+  const ADMIN_RE = /^(管理者|管理員|admin|administrator|是|y|yes|true|1)$/i;
   const auth = {
     SHEETS, DEALER_COLS, GAME_NAMES, gameKey, systemKey, parseSegments, segText, parseSeq, buildForGame, applyRow,
+    user: null,   // { id, name }
+    data: null,   // 目前遊戲的資料庫資料
     enabled() { return !!cfg().apiUrl; },
-    session() {
+    loggedIn() { return !!(this.enabled() && this.user); },
+    // 管理者：帳號表「權限」填「管理者」；本機模式（沒有資料庫）視為管理者
+    isAdmin() { return !this.enabled() || !!(this.user && ADMIN_RE.test(String(this.user.role || '').trim())); },
+    apiVersion: null,
+    outdated() { return this.enabled() && this.apiVersion !== null && this.apiVersion < API_VERSION; },
+    getKey() {
       try {
-        const s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
-        if (!s || Date.now() - s.at > SESSION_HOURS * 3600e3) return null;
-        return s;
+        const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + COOKIE + '=([^;]+)'));
+        return m ? decodeURIComponent(m[1]) : null;
       } catch (e) { return null; }
     },
-    save(s) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) { /* 忽略 */ } },
-    logout() { try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* 忽略 */ } },
+    setKey(k) {
+      const secure = location.protocol === 'https:' ? '; Secure' : '';
+      document.cookie = `${COOKIE}=${encodeURIComponent(k)}; max-age=${COOKIE_DAYS * 86400}; path=/; SameSite=Lax${secure}`;
+    },
+    clearKey() { document.cookie = `${COOKIE}=; max-age=0; path=/; SameSite=Lax`; },
+    device() {
+      const ua = navigator.userAgent || '';
+      const os = /Windows/.test(ua) ? 'Windows' : /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : '其他';
+      const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '瀏覽器';
+      return `${os} / ${br} / ${screen.width}x${screen.height}`;
+    },
     async post(body) {
-      const r = await fetch(cfg().apiUrl, { method: 'POST', body: JSON.stringify(body) }); // text/plain，不觸發 CORS 預檢
+      let r;
+      try { r = await fetch(cfg().apiUrl, { method: 'POST', body: JSON.stringify(body) }); } // text/plain，不觸發 CORS 預檢
+      catch (e) { throw new Error('無法連線到資料庫，請檢查網路'); }
       if (!r.ok) throw new Error('連線失敗（HTTP ' + r.status + '）');
-      return r.json();
+      const j = await r.json();
+      this.apiVersion = j && j.v != null ? +j.v : 0;
+      return j;
     },
     async login(id, pw) {
-      const res = await this.post({ action: 'login', id: String(id).trim(), pw: String(pw) });
+      const res = await this.post({ action: 'login', id: String(id).trim(), pw: String(pw), device: this.device() });
       if (!res.ok) throw new Error(res.error || '登入失敗');
-      const s = { id: res.id, name: res.name || res.id, token: res.token, at: Date.now(), data: res.data };
-      this.save(s);
-      return s;
+      this.setKey(res.key);
+      this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+      return this.user;
     },
-    async refresh() {
-      const s = this.session();
-      if (!s) throw new Error('尚未登入');
-      const res = await this.post({ action: 'data', token: s.token });
-      if (!res.ok) { if (res.expired) this.logout(); throw new Error(res.error || '讀取失敗'); }
-      s.data = res.data; s.loadedAt = Date.now();
-      this.save(s);
-      return s;
+    // 只驗證登入（首頁用）；被踢除時清掉 cookie
+    async check() {
+      const key = this.getKey();
+      if (!key) return null;
+      const res = await this.post({ action: 'check', key });
+      if (!res.ok) {
+        if (res.kicked) this.clearKey();
+        const e = new Error(res.error || '驗證失敗');
+        e.kicked = !!res.kicked;
+        throw e;
+      }
+      this.setKey(key); // 延長 cookie 期限
+      this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+      return this.user;
     },
-    requireLogin() {
-      if (!this.enabled() || this.session()) return true;
+    // 帳號設定：目前密碼必填；newId 改了會連動所有資料
+    async updateAccount(pw, changes) {
+      const res = await this.post(Object.assign({ action: 'updateAccount', key: this.getKey(), pw: String(pw) }, changes));
+      if (!res.ok) {
+        if (res.kicked) { this.clearKey(); this.toLogin(res.error); }
+        if (res.error === '未知的動作') throw new Error('資料庫程式不是最新版，請管理者重新部署後再試');
+        throw new Error(res.error || '修改失敗');
+      }
+      this.user = Object.assign({}, this.user, { id: res.id, name: res.name || res.id });
+      return res;
+    },
+    roleText() { return this.isAdmin() && this.enabled() ? '・管理者' : ''; },
+    async logout() {
+      const key = this.getKey();
+      this.clearKey();
+      this.user = null;
+      if (key && this.enabled()) { try { await this.post({ action: 'logout', key }); } catch (e) { /* 離線也算登出 */ } }
+    },
+    toLogin(msg) {
       const page = location.pathname.split('/').pop() || '';
-      location.replace('index.html?next=' + encodeURIComponent(page));
-      return false;
+      location.replace('index.html?next=' + encodeURIComponent(page) + (msg ? '&msg=' + encodeURIComponent(msg) : ''));
+    },
+    /**
+     * 遊戲頁啟動：驗證登入並取回該遊戲的資料庫資料，成功後呼叫 cb
+     * 本機模式（沒有 apiUrl）直接執行 cb
+     */
+    async start(game, cb) {
+      if (!this.enabled()) { cb(); return; }
+      const key = this.getKey();
+      if (!key) { this.toLogin(); return; }
+      const ui = KS.ui;
+      const msg = ui.h('div', { text: '正在向資料庫驗證登入…' });
+      const box = ui.h('div', { class: 'ks-modal-box', style: { maxWidth: '380px', padding: '22px', textAlign: 'center' } }, msg);
+      const overlay = ui.h('div', { class: 'ks-modal' }, box);
+      document.body.appendChild(overlay);
+      for (;;) {
+        try {
+          const res = await this.post({ action: 'game', key, game });
+          if (!res.ok) {
+            if (res.kicked) { this.clearKey(); this.toLogin(res.error || '請重新登入'); return; }
+            throw new Error(res.error || '驗證失敗');
+          }
+          this.setKey(key);
+          this.game = game;
+          this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+          this.data = res.data || {};
+          overlay.remove();
+          cb();
+          return;
+        } catch (e) {
+          msg.textContent = e.message;
+          await new Promise(resolve => {
+            const btn = ui.h('button', { text: '重試', style: { marginTop: '12px' }, onclick: () => { btn.remove(); msg.textContent = '正在向資料庫驗證登入…'; resolve(); } });
+            box.appendChild(btn);
+          });
+        }
+      }
     },
     forGame(game) {
-      const s = this.session();
-      if (!s || !KS.BJ && game !== 'sangong') return null;
-      return buildForGame(KS.BJ, s.data, s.id, game);
+      if (!this.loggedIn() || (!KS.BJ && game !== 'sangong')) return null;
+      return buildForGame(KS.BJ, this.data, this.user.id, game);
+    },
+    // 「我的策略」：存在資料庫、跟著登入者（Google 端只回傳自己的）
+    savedStrategies() {
+      return ((this.data && this.data.saved) || []).map(r => {
+        try { return { sid: r.sid, name: r.name, obj: JSON.parse(r.data) }; } catch (e) { return null; }
+      }).filter(Boolean);
+    },
+    async saveStrategy(game, sid, name, obj) {
+      const res = await this.post({ action: 'saveStrategy', key: this.getKey(), game, sid, name, data: JSON.stringify(obj) });
+      if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '儲存失敗'); }
+      return res.sid;
+    },
+    async deleteStrategy(game, sid) {
+      const res = await this.post({ action: 'deleteStrategy', key: this.getKey(), game, sid });
+      if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '刪除失敗'); }
+    },
+    // 練習成績：登入時存資料庫，本機模式存這台電腦
+    async saveScore(game, kind, rec) {
+      if (!this.loggedIn()) {
+        const k = 'ks_scores_' + game;
+        const list = KS.store.get(k, []);
+        list.push(Object.assign({ kind, time: new Date().toLocaleString() }, rec));
+        KS.store.set(k, list.slice(-200));
+        return;
+      }
+      const res = await this.post(Object.assign({ action: 'saveScore', key: this.getKey(), game, kind }, rec));
+      if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '儲存失敗'); }
+    },
+    async listScores(game, kind) {
+      if (!this.loggedIn()) return KS.store.get('ks_scores_' + game, []).filter(r => r.kind === kind).reverse();
+      const res = await this.post({ action: 'scores', key: this.getKey(), game, kind });
+      if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '讀取失敗'); }
+      return res.scores || [];
+    },
+    // 不重開頁面，重新讀取資料庫（策略、設定、我的策略）
+    onBeforeReload: null, // 遊戲頁註冊：先把還沒送出的策略存完
+    onReload: null,       // 遊戲頁註冊：套用新資料
+    onBeforeLeave: null,  // 遊戲頁註冊：離開前確認（例如策略未儲存）；回傳 false 取消離開
+    async reload() {
+      if (!this.loggedIn() || !this.game) return;
+      if (this.onBeforeReload) await this.onBeforeReload();
+      const res = await this.post({ action: 'game', key: this.getKey(), game: this.game });
+      if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '讀取失敗'); }
+      this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+      this.data = res.data || {};
+      if (this.onReload) this.onReload();
+      if (this._bar) { const old = this._bar; this.topBar(null, this.game, old); }
+    },
+    // 儲存狀態顯示（上方列）
+    status(text, bad) {
+      const el = typeof document !== 'undefined' && document.querySelector('.topbar .save-status');
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = bad ? 'var(--bad)' : 'var(--muted)';
     },
     // 遊戲頁上方列：回首頁、玩家、重新載入、登出
-    topBar(mount, game) {
+    topBar(mount, game, replace) {
       const ui = KS.ui, h = ui.h;
-      const s = this.session();
       const info = this.enabled()
-        ? (s ? `👤 ${ui.esc(s.name)}（${ui.esc(s.id)}）` : '未登入')
-        : '本機模式（未設定試算表）';
+        ? (this.user ? `👤 ${ui.esc(this.user.name)}（${ui.esc(this.user.id)}${this.roleText()}）` : '未登入')
+        : '本機模式（未設定資料庫，策略只存在這台電腦）';
       const bar = h('div', { class: 'topbar' },
-        h('a', { href: 'index.html', text: '← 選擇遊戲' }),
+        h('a', { href: 'index.html', text: '← 選擇遊戲', onclick: async ev => {
+          if (!this.onBeforeLeave) return;
+          ev.preventDefault();
+          if (await this.onBeforeLeave()) location.href = 'index.html';
+        } }),
         h('span', { html: info }));
-      if (this.enabled() && s) {
+      if (this.loggedIn()) {
         const r = this.forGame(game);
-        if (r) bar.appendChild(h('span', { class: 'muted', text: `試算表：${r.rowCount} 列策略${r.segments.length ? '、' + r.segments.length + ' 段牌況' : ''}` }));
-        if (r && r.errors.length) bar.appendChild(h('button', { class: 'btn-small', text: `⚠️ ${r.errors.length} 個試算表問題`, onclick: () => ui.modal('試算表內容問題', '<ul>' + r.errors.map(e => `<li>${ui.esc(e)}</li>`).join('') + '</ul>') }));
-        bar.appendChild(h('button', { class: 'btn-small', text: '🔄 重新載入試算表', onclick: async ev => {
-          ev.target.disabled = true; ev.target.textContent = '載入中…';
-          try { await this.refresh(); location.reload(); } catch (e) { alert(e.message); if (!this.session()) location.href = 'index.html'; ev.target.disabled = false; }
+        if (game !== 'sangong') {
+          const ok = r && r.strategy;
+          bar.appendChild(h('span', { class: ok ? 'ok-text' : 'muted', text: ok ? `✔ 載入玩家 ${this.user.id} 策略成功${r.missing ? `（還有 ${r.missing} 格未填）` : ''}` : `資料庫中還沒有玩家 ${this.user.id} 的策略` }));
+        }
+        if (r && r.errors.length) bar.appendChild(h('button', { class: 'btn-small', text: `⚠️ ${r.errors.length} 個資料庫問題`, onclick: () => ui.modal('資料庫內容問題', '<ul>' + r.errors.map(e => `<li>${ui.esc(e)}</li>`).join('') + '</ul>') }));
+        if (this.outdated()) bar.appendChild(h('span', { class: 'alert', style: { margin: 0, padding: '2px 8px' }, text: '⚠️ 資料庫程式不是最新版，請管理者重新部署（管理者權限等功能需要新版）' }));
+        bar.appendChild(h('span', { class: 'save-status muted' }));
+        bar.appendChild(h('button', { class: 'btn-small', text: '🔄 重新讀取資料庫', title: '不重開頁面，取得資料庫最新的策略與設定（目前牌局與結果會保留）', onclick: async ev => {
+          ev.target.disabled = true;
+          this.status('重新讀取中…');
+          try { await this.reload(); this.status('✔ 已取得資料庫最新內容 ' + new Date().toLocaleTimeString()); }
+          catch (e) { this.status('⚠️ ' + e.message, true); ev.target.disabled = false; }
         } }));
-        bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: () => { this.logout(); location.href = 'index.html'; } }));
+        bar.appendChild(h('a', { href: 'index.html#account', text: '⚙️ 帳號設定', onclick: async ev => {
+          if (!this.onBeforeLeave) return;
+          ev.preventDefault();
+          if (await this.onBeforeLeave()) location.href = 'index.html#account';
+        } }));
+        bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: async ev => {
+          if (this.onBeforeLeave && !(await this.onBeforeLeave())) return;
+          ev.target.disabled = true; await this.logout(); location.href = 'index.html';
+        } }));
       }
-      mount.appendChild(bar);
+      if (replace && replace.parentNode) replace.parentNode.replaceChild(bar, replace);
+      else mount.appendChild(bar);
+      this._bar = bar;
     }
   };
 
-  /* ---------------- 試算表範本（產生要貼上的內容） ---------------- */
+  /* ---------------- 資料庫範本（產生要貼上的內容） ---------------- */
   auth.template = function (BJ) {
-    const accounts = [SHEETS.accounts.head, ['player01', '1234', '範例玩家'], ['player02', '5678', '玩家二']];
+    const accounts = [SHEETS.accounts.head, ['admin', '請改密碼', '管理者', '啟用', '管理者'], ['player01', '1234', '範例玩家', '啟用', ''], ['player02', '5678', '玩家二', '啟用', '']];
     const settings = [SHEETS.settings.head,
       ['*', '美式21', 'Hi-Lo', '小牌多:~-2, 正常:-1~1, 大牌多:2~3, 大牌很多:4~', '300,500,800,1200,1800,2700,4000,6000'],
       ['*', '英式21', 'Hi-Lo', '小牌多:~-2, 正常:-1~1, 大牌多:2~3, 大牌很多:4~', '300,500,800,1200,1800,2700,4000,6000'],
       ['*', '22點', 'Hi-Lo', '小牌多:~-2, 正常:-1~1, 大牌多:2~3, 大牌很多:4~', '300,500,800,1200,1800,2700,4000,6000'],
-      ['*', '三公', '', '', '500,700,900,1400,2000,2900,5000'],
-      ['player01', '22點', 'Hi-Lo', '小牌多:~-1, 正常:0~2, 大牌多:3~', '500,1000,1500,2000']];
+      ['*', '三公', '', '', '500,700,900,1400,2000,2900,5000']];
     const strategies = [SHEETS.strategies.head];
     const C = BJ.cells;
     const dealer = DEALER_COLS.map(colToDealer);
@@ -228,22 +383,20 @@
       if (withDA) for (let t = 20; t >= 4; t--) strategies.push([id, gameName, seg, '加倍後投降', String(t), ...dealer.map(d => C.daCode(s, t, d))]);
       if (withEven) strategies.push([id, gameName, seg, '保險', 'BJ', '', '', '', '', '', '', '', '', 'N', 'N']);
     };
+    // 範例：player01 已填好的策略（player02 沒有列 = 新玩家，登入後是空白策略）
     ['american', 'british', 'star22'].forEach(g => {
       const s = C.materialize(BJ.ksDefaultStrategy(g));
-      table('*', GAME_NAMES[g], '基本', s, g === 'british', BJ.PRESETS[g].evenMoney);
+      table('player01', GAME_NAMES[g], '基本', s, g === 'british', BJ.PRESETS[g].evenMoney);
     });
-    // 分段覆蓋範例：只要寫與「基本」不同的格子
-    strategies.push(['*', '22點', '大牌多', '硬牌', '16', '', '', '', '', '', '', '', '', 'S', '']);
-    strategies.push(['*', '22點', '大牌很多', '硬牌', '16', '', '', '', '', '', '', '', 'S', 'S', 'S']);
-    strategies.push(['*', '22點', '大牌很多', '硬牌', '12', '', 'S', '', '', '', '', '', '', '', '']);
-    strategies.push(['*', '22點', '大牌很多', '保險', 'BJ', '', '', '', '', '', '', '', '', 'Y', 'Y']);
-    strategies.push(['*', '22點', '小牌多', '硬牌', '15', 'H', 'H', '', '', '', '', '', '', '', '']);
-    strategies.push(['*', '美式21', '大牌多', '保險', 'BJ', '', '', '', '', '', '', '', '', '', 'Y']);
-    strategies.push(['*', '美式21', '大牌很多', '保險', 'BJ', '', '', '', '', '', '', '', '', 'Y', 'Y']);
-    strategies.push(['*', '美式21', '大牌很多', '硬牌', '16', '', '', '', '', '', '', '', 'S', 'S', '']);
-    // 個人覆蓋範例
-    strategies.push(['player01', '22點', '基本', '硬牌', '12', 'S', 'S', '', '', '', '', '', '', '', '']);
-    strategies.push(['player01', '22點', '大牌多', '保險', 'BJ', '', '', '', '', '', '', '', '', 'Y', 'Y']);
+    // 牌況覆蓋範例：只要寫與「基本」不同的格子（牌況名稱要和玩家設定的牌況分段一致）
+    strategies.push(['player01', '22點', '大牌多', '硬牌', '16', '', '', '', '', '', '', '', '', 'S', '']);
+    strategies.push(['player01', '22點', '大牌很多', '硬牌', '16', '', '', '', '', '', '', '', 'S', 'S', 'S']);
+    strategies.push(['player01', '22點', '大牌很多', '硬牌', '12', '', 'S', '', '', '', '', '', '', '', '']);
+    strategies.push(['player01', '22點', '大牌很多', '保險', 'BJ', '', '', '', '', '', '', '', '', 'Y', 'Y']);
+    strategies.push(['player01', '22點', '小牌多', '硬牌', '15', 'H', 'H', '', '', '', '', '', '', '', '']);
+    strategies.push(['player01', '美式21', '大牌多', '保險', 'BJ', '', '', '', '', '', '', '', '', '', 'Y']);
+    strategies.push(['player01', '美式21', '大牌很多', '保險', 'BJ', '', '', '', '', '', '', '', '', 'Y', 'Y']);
+    strategies.push(['player01', '美式21', '大牌很多', '硬牌', '16', '', '', '', '', '', '', '', 'S', 'S', '']);
     return { accounts, settings, strategies };
   };
 

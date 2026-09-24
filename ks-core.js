@@ -397,16 +397,23 @@
       </div>`;
   };
 
-  ui.tabs = function (container, tabs, onSwitch) {
+  // beforeSwitch(from, to)：回傳 false（或 Promise<false>）可取消切換，例如有未儲存的修改
+  ui.tabs = function (container, tabs, onSwitch, beforeSwitch) {
     const bar = ui.h('div', { class: 'tabs' });
     const panes = {};
+    let current = tabs[0] && tabs[0].key;
     tabs.forEach((t, i) => {
-      const btn = ui.h('button', { class: 'tab' + (i === 0 ? ' active' : ''), text: t.label, onclick: () => show(t.key) });
+      const btn = ui.h('button', { class: 'tab' + (i === 0 ? ' active' : ''), text: t.label, onclick: async () => {
+        if (t.key === current) return;
+        if (beforeSwitch && !(await beforeSwitch(current, t.key))) return;
+        show(t.key);
+      } });
       btn.dataset.key = t.key;
       bar.appendChild(btn);
       panes[t.key] = ui.h('div', { class: 'tab-pane', style: { display: i === 0 ? '' : 'none' } });
     });
     function show(key) {
+      current = key;
       Array.from(bar.children).forEach(b => b.classList.toggle('active', b.dataset.key === key));
       Object.keys(panes).forEach(k => { panes[k].style.display = k === key ? '' : 'none'; });
       store.set('ks_tab_' + location.pathname, key);

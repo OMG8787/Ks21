@@ -41,40 +41,172 @@
     if (!S.counts) S.counts = defaultCounts(S.decks);
     const customTags = store.get('ks_custom_tags', null);
     if (Array.isArray(customTags) && customTags.length === 10) KS.COUNT_SYSTEMS.custom.tags = customTags.map(Number);
-    store.get(K('strats'), []).forEach(x => {
-      try { S.user.push({ id: x.id || ('u' + Math.random().toString(36).slice(2)), s: BJ.normalizeStrategy(x) }); } catch (e) { /* 略過壞資料 */ }
-    });
-
-    // Google 試算表：玩家策略、算牌系統、牌況分段、智慧加注序列
-    const sheetRes = KS.auth ? KS.auth.forGame(preset) : null;
-    S.sheet = sheetRes && sheetRes.strategy ? sheetRes : null;
-    if (sheetRes) {
-      if (sheetRes.countSystem) S.countSystem = sheetRes.countSystem;
-      if (sheetRes.seq.length) S.boostSeq = sheetRes.seq.slice();
+    const ONLINE = !!(KS.auth && KS.auth.loggedIn());
+    function loadSavedFromSheet() {
+      const list = [];
+      KS.auth.savedStrategies().forEach(x => {
+        try { const st = BJ.normalizeStrategy(x.obj); st.name = x.name || st.name; list.push({ id: x.sid, s: st }); } catch (e) { /* 略過壞資料 */ }
+      });
+      return list;
     }
-    const DEF_STRAT = S.sheet ? 'sheet' : 'ks';
+    if (ONLINE) {
+      S.user = loadSavedFromSheet();
+    } else {
+      store.get(K('strats'), []).forEach(x => {
+        try { S.user.push({ id: x.id || ('u' + Math.random().toString(36).slice(2)), s: BJ.normalizeStrategy(x) }); } catch (e) { /* 略過壞資料 */ }
+      });
+    }
+
+    // 資料庫：玩家策略、算牌系統、牌況分段、智慧加注序列
+    let sheetRes = null;
+    function applySheet() {
+      sheetRes = KS.auth ? KS.auth.forGame(preset) : null;
+      S.sheet = sheetRes && sheetRes.strategy ? sheetRes : null;
+      if (sheetRes) {
+        if (sheetRes.countSystem) S.countSystem = sheetRes.countSystem;
+        if (sheetRes.seq.length) S.boostSeq = sheetRes.seq.slice();
+      }
+    }
+    applySheet();
     let penInput = null; // 切牌卡輸入框（勾選每局洗牌時停用）
 
     const saveRules = () => { const r = Object.assign({}, S.rules); delete r.name; store.set(K('rules'), r); updateHeader(); };
-    const saveUser = () => { store.set(K('strats'), S.user.map(u => BJ.exportStrategy(u.s, { id: u.id }))); refreshStratSelects(); };
+    /* ============ 我的策略：手動儲存 ============
+       u = { id, s: 目前編輯中的策略, base: 上次儲存的內容（新策略為 null）, dirty: 是否有未儲存修改, from: 複製來源 } */
+    const snap = st => JSON.parse(JSON.stringify(BJ.exportStrategy(st)));
+    S.user.forEach(u => { u.base = snap(u.s); u.dirty = false; });
+    let stratPane = null;
+    const saveLocal = () => store.set(K('strats'), S.user.filter(u => u.base).map(u => Object.assign({}, u.base, { id: u.id })));
+    const dirtyList = () => S.user.filter(u => u.dirty);
+    function markDirty(id) {
+      const u = S.user.find(x => x.id === id);
+      if (!u) return;
+      u.dirty = true;
+      refreshStratSelects();
+      if (stratPane) stratPane.updateDirty();
+    }
+    async function commit(u) {
+      const obj = snap(u.s);
+      if (ONLINE) {
+        KS.auth.status('儲存中…');
+        await KS.auth.saveStrategy(preset, u.id, u.s.name, obj);
+        KS.auth.status('✔ 已儲存到資料庫 ' + new Date().toLocaleTimeString());
+      }
+      u.base = obj; u.dirty = false; u.from = null;
+      if (!ONLINE) saveLocal();
+      refreshStratSelects();
+      if (stratPane) stratPane.updateDirty();
+    }
+    function discard(u) {
+      if (!u.base) S.user = S.user.filter(x => x !== u);
+      else { u.s = BJ.cells.materialize(BJ.normalizeStrategy(JSON.parse(JSON.stringify(u.base)))); u.dirty = false; }
+      refreshStratSelects();
+      if (stratPane) { stratPane.updateDirty(); stratPane.refresh(); }
+    }
+    async function removeUser(id) {
+      const u = S.user.find(x => x.id === id);
+      S.user = S.user.filter(x => x.id !== id);
+      refreshStratSelects();
+      if (!u || !u.base) return; // 從未儲存過的新策略，只要從畫面移除
+      if (!ONLINE) { saveLocal(); return; }
+      KS.auth.status('刪除中…');
+      try { await KS.auth.deleteStrategy(preset, id); KS.auth.status('✔ 已從資料庫刪除'); }
+      catch (e) { KS.auth.status('⚠️ ' + e.message, true); }
+    }
+
+    // 列出這次修改了哪些格子：「硬 16 對莊家 10：要牌（H）→ 停牌（S）」
+    const CODE_TEXT = { H: '要牌', S: '停牌', Dh: '加倍，不能加倍就要牌', Ds: '加倍，不能加倍就停牌', Rh: '投降，不能投降就要牌', Rs: '投降，不能投降就停牌', P: '分牌', D: '加倍', R: '投降', '-': '不分牌（看點數表）', Y: '先收 1 倍', N: '等莊家', '?': '未填' };
+    const SHORT = { Dh: 'D', Rh: 'R', '-': '·' };
+    function codeText(kind, key, code) {
+      if (code === '?') return '未填';
+      let t = CODE_TEXT[code] || code;
+      if (S.rules.freeDouble && code[0] === 'D') {
+        const total = kind === 'pair' ? key * 2 : key;
+        const free = (kind === 'hard' || (kind === 'pair' && key !== 11)) && total >= 9 && total <= 11;
+        t = (free ? '免費' : '自費') + t;
+      }
+      return kind === 'even' ? t : `${t}（${SHORT[code] || code}）`;
+    }
+    function diffStrategy(u) {
+      if (!u.base) return [`新策略「${u.s.name}」${u.from ? '（從「' + u.from + '」複製）' : ''}，還沒有儲存過`];
+      const C = BJ.cells, old = BJ.normalizeStrategy(JSON.parse(JSON.stringify(u.base))), cur = u.s, out = [];
+      if ((u.base.name || '') !== cur.name) out.push(`名稱：「${u.base.name}」→「${cur.name}」`);
+      const cmp = (kind, key, label, get, cols) => (cols || BJ.DEALER_VALS).forEach(d => {
+        const x = C.isFilled(old, kind, key, d) ? get(old, key, d) : '?', y = C.isFilled(cur, kind, key, d) ? get(cur, key, d) : '?';
+        if (x !== y) out.push(`${label} 對莊家 ${DEALER_LABEL(d)}：${codeText(kind, key, x)} → ${codeText(kind, key, y)}`);
+      });
+      for (let pv = 11; pv >= 2; pv--) cmp('pair', pv, '對子 ' + (pv === 11 ? 'A,A' : pv + ',' + pv), C.pairCode);
+      for (let t = 21; t >= 4; t--) cmp('hard', t, '硬 ' + t, C.hardCode);
+      for (let t = 21; t >= 13; t--) cmp('soft', t, `軟 ${t}（A,${t - 11}）`, C.softCode);
+      if (S.rules.surrenderAfterDouble) for (let t = 20; t >= 4; t--) cmp('da', t, '加倍後 ' + t, C.daCode);
+      if (S.rules.evenMoney) cmp('even', 0, '玩家 BJ（保險）', (st, k, d) => C.evenCode(st, d), [10, 11]);
+      return out;
+    }
+    // 提醒視窗：列出修改內容；回傳 'save' | 'discard' | 'cancel'
+    function askChanges(u, opt) {
+      return new Promise(resolve => {
+        const list = diffStrategy(u);
+        const shown = list.slice(0, 40);
+        const done = v => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+        const onKey = e => { if (e.key === 'Escape') done('cancel'); };
+        const btns = h('div', { class: 'row', style: { justifyContent: 'flex-end', marginTop: '12px' } },
+          h('button', { class: 'btn-good', text: opt.saveText || '💾 儲存', onclick: () => done('save') }),
+          opt.allowDiscard ? h('button', { class: 'btn-danger', text: opt.discardText || '不儲存（放棄修改）', onclick: () => done('discard') }) : null,
+          h('button', { class: 'btn-ghost', text: opt.cancelText || '取消', onclick: () => done('cancel') }));
+        const overlay = h('div', { class: 'ks-modal', onclick: e => { if (e.target === overlay) done('cancel'); } },
+          h('div', { class: 'ks-modal-box', style: { maxWidth: '640px' } },
+            h('div', { class: 'ks-modal-head' }, h('strong', { text: opt.title })),
+            h('div', { class: 'ks-modal-body' },
+              opt.message ? h('p', { text: opt.message, style: { marginTop: 0 } }) : null,
+              h('p', { html: `策略「<b>${ui.esc(u.s.name)}</b>」${u.base ? `共有 <b>${list.length}</b> 處修改：` : ''}` }),
+              h('ul', { class: 'change-list' }, shown.map(t => h('li', { text: t }))),
+              list.length > shown.length ? h('p', { class: 'muted', text: `…還有 ${list.length - shown.length} 處` }) : null,
+              h('p', { class: 'muted', text: ONLINE ? '儲存後會寫入 資料庫的「我的策略」。' : '儲存後會存在這台電腦（本機模式）。' }),
+              btns)));
+        document.body.appendChild(overlay);
+        document.addEventListener('keydown', onKey);
+      });
+    }
+    // 有未儲存的修改時詢問；回傳 true 表示可以繼續
+    async function resolveDirty(reason) {
+      for (const u of dirtyList()) {
+        const c = await askChanges(u, { title: '策略還沒有儲存', message: `你要${reason}，但以下修改還沒有儲存。要儲存嗎？`, allowDiscard: true, cancelText: '取消（留在這裡）' });
+        if (c === 'cancel') return false;
+        if (c === 'discard') { discard(u); continue; }
+        try { await commit(u); }
+        catch (e) { alert('儲存失敗：' + e.message); return false; }
+      }
+      return true;
+    }
+    window.addEventListener('beforeunload', e => { if (dirtyList().length) { e.preventDefault(); e.returnValue = ''; } });
 
     /* ============ 策略庫 ============ */
-    const ksDefault = BJ.ksDefaultStrategy(preset);
     let optCache = null, optKey = '';
     function optimal() {
       const key = JSON.stringify([S.rules, S.counts]);
       if (optKey !== key) { optCache = BJ.generateOptimalStrategy(S.rules, S.counts, '最佳基本策略（自動計算）'); optKey = key; }
       return optCache;
     }
+    // 最佳基本策略只有管理者看得到（帳號表權限＝管理者；本機模式視為管理者）
+    const canSeeOptimal = () => !KS.auth || KS.auth.isAdmin();
+    const missText = n => (n ? `（還有 ${n} 格未填）` : '');
     function library() {
-      const sheetEntry = S.sheet ? [{ id: 'sheet', name: `📄 試算表策略（${KS.auth.session().name}${S.sheet.segments.length ? '，' + S.sheet.segments.length + ' 段牌況' : ''}）`, builtin: true, get: () => S.sheet.strategy }] : [];
-      return sheetEntry.concat([
-        { id: 'ks', name: 'KS 預設（原檔策略）', builtin: true, get: () => ksDefault },
-        { id: 'opt', name: '最佳基本策略（依目前規則與牌組自動計算）', builtin: true, get: optimal }
-      ]).concat(S.user.map(u => ({ id: u.id, name: u.s.name, builtin: false, get: () => u.s })));
+      const list = [];
+      if (S.sheet) list.push({ id: 'sheet', name: `📄 資料庫策略（${KS.auth.user.name}${S.sheet.segments.length ? '，' + S.sheet.segments.length + ' 段牌況' : ''}）${missText(BJ.missingCells(S.sheet.strategy))}`, builtin: true, get: () => S.sheet.strategy });
+      if (canSeeOptimal()) list.push({ id: 'opt', name: '最佳基本策略（管理者專用・依目前規則自動計算）', builtin: true, get: optimal });
+      S.user.forEach(u => list.push({ id: u.id, name: u.s.name + missText(BJ.missingCells(u.s)) + (u.dirty ? '（● 未儲存）' : ''), builtin: false, get: () => u.s }));
+      return list;
     }
-    const libEntry = id => library().find(x => x.id === id) || library()[0];
-    const getStrat = id => libEntry(id).get();
+    const libEntry = id => library().find(x => x.id === id) || library()[0] || null;
+    const getStrat = id => { const e = libEntry(id); return e ? e.get() : null; };
+    const defStrat = () => { const l = library(); return l.length ? l[0].id : ''; };
+    // 策略能不能拿來模擬／建議／當標準答案：要存在且全部填完
+    function unusable(id) {
+      const e = libEntry(id);
+      if (!e) return '還沒有策略，請先到「📋 策略管理」按「＋ 新增空白策略」並填完';
+      const m = BJ.missingCells(e.get());
+      return m ? `策略「${e.get().name}」還有 ${m} 格沒填，填完才能使用` : null;
+    }
     const stratSelects = new Set();
     function stratSelect(value, onchange) {
       const s = h('select', { class: 'strat-select', onchange: () => onchange && onchange(s.value) });
@@ -83,10 +215,12 @@
       return s;
     }
     function fillStrat(s, value) {
-      const v = value || s.value || DEF_STRAT;
+      const v = value || s.value || defStrat();
+      const lib = library();
       s.innerHTML = '';
-      library().forEach(e => s.appendChild(h('option', { value: e.id, text: e.name })));
-      s.value = library().some(e => e.id === v) ? v : DEF_STRAT;
+      if (!lib.length) { s.appendChild(h('option', { value: '', text: '（尚無策略，請到「策略管理」新增）' })); s.value = ''; return; }
+      lib.forEach(e => s.appendChild(h('option', { value: e.id, text: e.name })));
+      s.value = lib.some(e => e.id === v) ? v : lib[0].id;
     }
     function refreshStratSelects() { stratSelects.forEach(s => fillStrat(s)); }
 
@@ -119,14 +253,30 @@
       { key: 'quiz', label: '❓ 測驗' },
       { key: 'strat', label: '📋 策略管理' },
       { key: 'rules', label: '⚙️ 規則與牌組' }
-    ], key => { if (key === 'play') play.render(); });
+    ], key => { if (key === 'play') play.render(); },
+    async from => (from === 'strat' && dirtyList().length ? resolveDirty('離開「策略管理」') : true));
 
     buildRulesPane(tabs.panes.rules);
-    buildSimPane(tabs.panes.sim);
+    const simPane = buildSimPane(tabs.panes.sim);
     const play = buildPlayPane(tabs.panes.play);
     buildDrillPane(tabs.panes.drill);
-    buildQuizPane(tabs.panes.quiz);
-    buildStratPane(tabs.panes.strat);
+    const quizPane = buildQuizPane(tabs.panes.quiz);
+    stratPane = buildStratPane(tabs.panes.strat);
+    if (KS.auth) KS.auth.onBeforeLeave = () => (dirtyList().length ? resolveDirty('離開這個頁面') : true);
+    if (ONLINE) {
+      KS.auth.onBeforeReload = async () => { if (!(await resolveDirty('重新讀取資料庫'))) throw new Error('已取消重新讀取'); };
+      KS.auth.onReload = () => {
+        applySheet();
+        S.user = loadSavedFromSheet();
+        S.user.forEach(u => { u.base = snap(u.s); u.dirty = false; });
+        updateHeader();
+        refreshStratSelects();
+        simPane.setBoost(S.boostSeq);
+        quizPane.renderQuizSeg();
+        stratPane.refresh();
+        play.render();
+      };
+    }
     const lastTab = store.get('ks_tab_' + location.pathname, null);
     if (lastTab && tabs.panes[lastTab]) tabs.show(lastTab);
 
@@ -193,7 +343,7 @@
       const seed = h('input', { type: 'text', placeholder: '空白 = 隨機', style: { width: '120px' }, onchange: () => KS.setSeed(seed.value.trim()) });
       pane.appendChild(deckBox);
       pane.appendChild(h('div', { class: 'panel' }, h('h3', { text: '算牌系統' }),
-        h('div', { class: 'row' }, '系統', sysSel, S.sheet && sheetRes.countSystem ? h('b', { text: '（目前由試算表指定）' }) : null, h('small', { class: 'muted', text: '選「自訂」即可編輯每張牌的權重。KO 為非平衡系統（直接看 RC）。' })),
+        h('div', { class: 'row' }, '系統', sysSel, S.sheet && sheetRes.countSystem ? h('b', { text: '（目前由資料庫指定）' }) : null, h('small', { class: 'muted', text: '選「自訂」即可編輯每張牌的權重。KO 為非平衡系統（直接看 RC）。' })),
         tagBox,
         h('div', { class: 'row' }, '亂數種子（填數字可重現同樣的牌序）', seed)));
     }
@@ -204,8 +354,8 @@
     function buildSimPane(pane) {
       const seatBox = h('div');
       const seats = [];
-      const SEAT_KEY = K('seats') + (S.sheet ? '_sheet' : '');
-      const saved = store.get(SEAT_KEY, [{ bet: 500, mode: 'fixed', strat: DEF_STRAT }]);
+      const SEAT_KEY = K('seats') + (ONLINE ? '_' + KS.auth.user.id : '');
+      const saved = store.get(SEAT_KEY, [{ bet: 500, mode: 'fixed', strat: defStrat() }]);
       const saveSeats = () => store.set(SEAT_KEY, seats.map(r => ({ bet: +r.bet.value, mode: r.mode.value, strat: r.strat.value })));
       function addSeat(pre) {
         if (seats.length >= 7) { alert('最多 7 位玩家'); return; }
@@ -213,7 +363,7 @@
         const r = {};
         r.bet = h('input', { type: 'number', min: 1, value: pre.bet || 500, onchange: saveSeats });
         r.mode = sel([['fixed', '固定下注'], ['boost', '智慧加注序列'], ['ramp', '依 True Count 加注']], pre.mode || 'fixed', saveSeats);
-        r.strat = stratSelect(pre.strat || DEF_STRAT, saveSeats);
+        r.strat = stratSelect(pre.strat || defStrat(), saveSeats);
         const ro = [['', '隨機']].concat(KS.RANKS.map(x => [x, x]));
         r.c1 = sel(ro, ''); r.c2 = sel(ro, '');
         r.label = h('b');
@@ -256,10 +406,12 @@
         h('div', { class: 'row' }, runBtn, stopBtn, prog, progText)));
       pane.appendChild(out);
 
+      const api = { setBoost: seq => { boostInp.value = seq.join(','); } };
       async function run() {
         const n = Math.max(1, parseInt(rounds.value, 10) || 1);
         let cfg, sim;
         try {
+          seats.forEach((r, i) => { const bad = unusable(r.strat.value); if (bad) throw new Error(`玩家${i + 1}：${bad}`); });
           runBtn.disabled = true; progText.textContent = '準備中（計算策略）…';
           await new Promise(r => setTimeout(r, 20));
           cfg = {
@@ -286,6 +438,7 @@
           alert('模擬錯誤：' + e.message);
         } finally { runBtn.disabled = false; stopBtn.disabled = true; }
       }
+      return api;
     }
 
     function renderSim(out, sim, cfg) {
@@ -319,7 +472,7 @@
           <h4>路單（前 ${s.road.length} 局）</h4>${ui.roadHtml(s.road, 600)}
           <h4>依下注前牌況值（平衡系統為 True Count、KO 為 RC）（${KS.COUNT_SYSTEMS[cfg.countSystem].name}）</h4>
           <div class="table-wrap"><table><tr><th>牌況值</th><th>局數</th><th>比例</th><th>勝率(不含和)</th><th>平均每局EV</th></tr>${tcRows}</table></div>
-          ${Object.keys(s.seg).length ? `<h4>依試算表牌況分段</h4><div class="table-wrap"><table><tr><th>牌況</th><th>局數</th><th>比例</th><th>勝率(不含和)</th><th>平均每局EV</th></tr>${Object.keys(s.seg).map(k => { const b = s.seg[k]; return `<tr><td>${ui.esc(k)}</td><td>${b.n}</td><td>${ui.pct(b.n, s.rounds, 1)}</td><td>${ui.pct(b.w, b.w + b.l)}</td><td class="${clsNum(b.units)}">${evPct(b.units / b.n)}</td></tr>`; }).join('')}</table></div>` : ''}
+          ${Object.keys(s.seg).length ? `<h4>依資料庫牌況分段</h4><div class="table-wrap"><table><tr><th>牌況</th><th>局數</th><th>比例</th><th>勝率(不含和)</th><th>平均每局EV</th></tr>${Object.keys(s.seg).map(k => { const b = s.seg[k]; return `<tr><td>${ui.esc(k)}</td><td>${b.n}</td><td>${ui.pct(b.n, s.rounds, 1)}</td><td>${ui.pct(b.w, b.w + b.l)}</td><td class="${clsNum(b.units)}">${evPct(b.units / b.n)}</td></tr>`; }).join('')}</table></div>` : ''}
           <small class="muted">資金最高 ${ui.fmt(s.bank.peak)}、最低 ${ui.fmt(s.bank.low)}、最大單注 ${ui.fmt(s.maxBet)}</small></details></div>`);
       });
 
@@ -361,7 +514,7 @@
 
       const seatsN = sel([['1', '1 位'], ['2', '2 位'], ['3', '3 位'], ['4', '4 位']], '1');
       const bet = h('input', { type: 'number', min: 1, value: 500 });
-      const advStrat = stratSelect(S.sheet ? 'sheet' : 'opt', () => render());
+      const advStrat = stratSelect(defStrat(), () => render());
       const chk = (label, on) => { const c = h('input', { type: 'checkbox', checked: on, onchange: () => render() }); return [c, h('label', null, c, label)]; };
       const [cCount, lCount] = chk('顯示 RC/TC', true);
       const [cEV, lEV] = chk('顯示各動作 EV 與勝率', true);
@@ -411,9 +564,11 @@
         const c = rd.current();
         const L = rd.legal(c.hand, c.seat);
         if (!L[a]) return;
-        const adv = BJ.decide(getStrat(advStrat.value), c.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
+        const noAdv = unusable(advStrat.value);
+        const adv = noAdv ? a : BJ.decide(getStrat(advStrat.value), c.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
         sess.decisions++;
-        if (adv !== a) {
+        if (noAdv) lastMsg = '';
+        else if (adv !== a) {
           sess.dev++;
           c.hand.deviations = (c.hand.deviations || 0) + 1;
           lastMsg = cWarn.checked ? `<div class="alert">⚠️ 你選「${BJ.ACTION_LABEL[a]}」，策略建議「${BJ.ACTION_LABEL[adv]}」</div>` : '';
@@ -508,7 +663,7 @@
             <div class="stat"><b>${(shoe.dealt / shoe.total * 100).toFixed(0)}%</b><span>${S.shuffleMode === 'round' ? '本局已發出（每局洗牌）' : '已發出（切牌卡 ' + S.pen + '%）'}</span></div></div>` +
             (S.shuffleMode === 'round' ? '<small class="muted">每局洗牌：每局開始時牌全部放回，RC/TC 歸零，只反映本局發出的牌。</small>' : '');
           const as = getStrat(advStrat.value);
-          if (as.segmented) {
+          if (as && as.segmented) {
             const idx = counter.index(shoe.size());
             const seg = BJ.pickSegment(as, { tc: idx }).seg;
             inf += `<div class="hint">🎯 目前牌況：<b>${seg ? ui.esc(seg.name) : '基本'}</b>（牌況值 ${Math.floor(idx + 1e-9)}）— 策略建議與「偏離提醒」依此段策略</div>`;
@@ -517,9 +672,11 @@
         inf += '</div>';
         if (cur && (cEV.checked || cAdv.checked)) {
           const strat = getStrat(advStrat.value);
-          const adv = BJ.decide(strat, cur.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
+          const noAdv = unusable(advStrat.value);
+          const adv = noAdv ? null : BJ.decide(strat, cur.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
           inf += '<div class="panel"><h3>目前手牌分析</h3>';
-          if (cAdv.checked) {
+          if (cAdv.checked && noAdv) inf += `<div class="hint">📋 ${ui.esc(noAdv)}</div>`;
+          else if (cAdv.checked) {
             const sg = BJ.pickSegment(strat, { tc: counter.index(shoe.size()) }).seg;
             inf += `<div class="hint">📋 ${ui.esc(libEntry(advStrat.value).name)}${sg ? '［' + ui.esc(sg.name) + '］' : ''} 建議：<b>${BJ.ACTION_LABEL[adv]}</b></div>`;
           }
@@ -559,6 +716,34 @@
       return { render };
     }
 
+    // 成績按鈕：💾 儲存成績（存完開始新的一輪）、📜 歷史成績
+    function scoreButtons(kind, getRecord, reset) {
+      const msg = h('span', { class: 'muted' });
+      const save = h('button', { class: 'btn-small', text: '💾 儲存成績', onclick: async () => {
+        const rec = getRecord();
+        if (!rec || !rec.total) { msg.textContent = '還沒有作答紀錄'; return; }
+        save.disabled = true; msg.textContent = '儲存中…';
+        try {
+          await KS.auth.saveScore(preset, kind, rec);
+          msg.textContent = `✔ 已儲存（${rec.correct}/${rec.total}，${rec.rate}）${ONLINE ? '到資料庫' : '到這台電腦'}，開始新的一輪`;
+          reset();
+        } catch (e) { msg.textContent = '⚠️ ' + e.message; }
+        save.disabled = false;
+      } });
+      const hist = h('button', { class: 'btn-small', text: '📜 歷史成績', onclick: async () => {
+        hist.disabled = true;
+        try {
+          const list = await KS.auth.listScores(preset, kind);
+          const rows = list.map(r => `<tr><td>${ui.esc(r.time)}</td><td>${r.total}</td><td>${r.correct}</td><td><b>${ui.esc(r.rate)}</b></td><td style="text-align:left;white-space:normal">${ui.esc(r.detail || '')}</td></tr>`).join('');
+          ui.modal(`${kind}歷史成績（${P.name}）`, list.length
+            ? `<div class="table-wrap"><table><tr><th>時間</th><th>題數</th><th>答對</th><th>正確率</th><th>明細</th></tr>${rows}</table></div><p class="muted">最新的在最上面${ONLINE ? '，資料存在資料庫「練習成績」' : '，資料只存在這台電腦'}。</p>`
+            : '<p class="muted">還沒有儲存過成績。</p>');
+        } catch (e) { msg.textContent = '⚠️ ' + e.message; }
+        hist.disabled = false;
+      } });
+      return [save, hist, msg];
+    }
+
     /* ================================================================ */
     /* 🧮 算牌練習                                                       */
     /* ================================================================ */
@@ -584,8 +769,21 @@
         h('div', { class: 'row' }, '系統', sys, '副數', decks, per, '間隔(毫秒)', speed, '每翻', every, '張問一次（0=發完才問）'),
         h('div', { class: 'row' }, '要回答：', h('label', null, qRC, 'Running Count'), h('label', null, qTC, 'True Count（±0.5 內算對）'), h('label', null, qBig, '剩餘大牌張數（10/J/Q/K/A，±2 內算對）'),
           h('label', null, manual, '手動翻牌（按空白鍵翻下一張）')),
-        h('div', { class: 'row' }, startBtn, pauseBtn)));
+        h('div', { class: 'row' }, startBtn, pauseBtn,
+          h('button', { class: 'btn-small', text: '重設成績', onclick: resetScore }),
+          ...scoreButtons('算牌練習', drillRecord, resetScore))));
       pane.appendChild(h('div', { class: 'grid2' }, h('div', null, h('div', { class: 'panel' }, stage, quiz)), scoreBox));
+      function resetScore() { Object.keys(score).forEach(k => { score[k] = { n: 0, ok: 0, err: 0 }; }); renderScore(); }
+      function drillRecord() {
+        const lab = { RC: 'RC', TC: 'TC', BIG: '剩餘大牌' };
+        const ks = Object.keys(score).filter(k => score[k].n);
+        const total = ks.reduce((a, k) => a + score[k].n, 0), correct = ks.reduce((a, k) => a + score[k].ok, 0);
+        const parts = ks.map(k => `${lab[k]} ${score[k].ok}/${score[k].n}（平均誤差 ${(score[k].err / score[k].n).toFixed(2)}）`);
+        return {
+          total, correct, rate: total ? (correct / total * 100).toFixed(1) + '%' : '-',
+          detail: [KS.COUNT_SYSTEMS[sys.value].name, `${decks.value} 副`, `每次 ${per.value} 張`, manual.checked ? '手動翻牌' : `間隔 ${speed.value} 毫秒`, parts.join('、')].join('｜')
+        };
+      }
       stage.innerHTML = '<p>按「開始」後會一張張翻牌，請在心中計算。</p>';
       renderScore();
 
@@ -678,7 +876,7 @@
     /* ❓ 測驗                                                          */
     /* ================================================================ */
     function buildQuizPane(pane) {
-      const strat = stratSelect(S.sheet ? 'sheet' : 'opt', () => renderQuizSeg());
+      const strat = stratSelect(defStrat(), () => renderQuizSeg());
       const tHard = h('input', { type: 'checkbox', checked: true });
       const tSoft = h('input', { type: 'checkbox', checked: true });
       const tPair = h('input', { type: 'checkbox', checked: true });
@@ -690,8 +888,8 @@
       function renderQuizSeg() {
         const s = getStrat(strat.value);
         quizSeg.innerHTML = '';
-        quizSegWrap.style.display = s.segmented ? '' : 'none';
-        if (!s.segmented) return;
+        quizSegWrap.style.display = s && s.segmented ? '' : 'none';
+        if (!s || !s.segmented) return;
         quizSeg.appendChild(h('option', { value: '', text: '基本' }));
         s.segments.forEach(x => quizSeg.appendChild(h('option', { value: x.name, text: `${x.name}（${KS.auth.segText(x)}）` })));
       }
@@ -708,7 +906,18 @@
           '指定點數', total, '指定莊家明牌', upSel),
         h('div', { class: 'row' }, '策略', strat, quizSegWrap, judge,
           h('button', { class: 'btn-good', text: '下一題 (N)', onclick: next }),
-          h('button', { class: 'btn-small', text: '重設成績', onclick: () => { Object.assign(sc, { n: 0, ok: 0, byType: {}, wrong: [] }); renderScore(); } }))));
+          h('button', { class: 'btn-small', text: '重設成績', onclick: resetQuiz }),
+          ...scoreButtons('測驗', quizRecord, resetQuiz))));
+      function resetQuiz() { Object.assign(sc, { n: 0, ok: 0, byType: {}, wrong: [] }); renderScore(); }
+      function quizRecord() {
+        const tl = { hard: '硬牌', soft: '軟牌', pair: '對子' };
+        const parts = Object.keys(sc.byType).map(k => `${tl[k]} ${sc.byType[k].ok}/${sc.byType[k].n}`);
+        const seg = quizSeg.value ? `牌況 ${quizSeg.value}` : '';
+        return {
+          total: sc.n, correct: sc.ok, rate: sc.n ? (sc.ok / sc.n * 100).toFixed(1) + '%' : '-',
+          detail: [parts.join('、'), '策略：' + (libEntry(strat.value) || { name: '—' }).name, seg, '標準：' + (judge.value === 'ev' ? 'EV 最高' : '選定策略')].filter(Boolean).join('｜')
+        };
+      }
       pane.appendChild(h('div', { class: 'grid2' }, h('div', { class: 'panel' }, stage, btns, fb), scoreBox));
       renderScore();
 
@@ -765,9 +974,11 @@
       }
       function answer(a) {
         if (!q || q.answered) return;
+        const bad = unusable(strat.value);
+        if (bad && judge.value === 'strat') { fb.innerHTML = `<div class="alert">${ui.esc(bad)}。也可以把標準改成「以 EV 最高為標準答案」。</div>`; return; }
         q.answered = true;
         const st = getStrat(strat.value);
-        const sAns = BJ.decide(st, { cards: q.cards }, q.up, q.L, { segment: quizSeg.value || '__base__' });
+        const sAns = bad ? null : BJ.decide(st, { cards: q.cards }, q.up, q.L, { segment: quizSeg.value || '__base__' });
         const c10 = BJ.toCounts10(S.counts);
         [q.up, ...q.cards].forEach(c => { const i = KS.idx10(c); if (c10[i] > 0) c10[i]--; });
         const ev = BJ.evaluate(q.cards, q.up, c10, S.rules, q.L, { fromAA: KS.rankOf(q.cards[0]) === 'A' && KS.rankOf(q.cards[1]) === 'A' });
@@ -781,7 +992,7 @@
         if (sc.wrong.length > 50) sc.wrong.pop();
         const loss = ev[a] && ev[correct] ? ev[correct].ev - ev[a].ev : 0;
         fb.innerHTML = `<div class="${ok ? 'okbox' : 'alert'}">${ok ? '✔ 正確' : '✘ 錯誤'}：你選「${BJ.ACTION_LABEL[a]}」；
-          策略答案「${BJ.ACTION_LABEL[sAns]}」；EV 最高「${BJ.ACTION_LABEL[ev.best]}」${!ok && loss > 0 ? `，少了 ${(loss * 100).toFixed(2)}% 原注` : ''}</div>
+          策略答案「${(BJ.ACTION_LABEL[sAns] || '—')}」；EV 最高「${BJ.ACTION_LABEL[ev.best]}」${!ok && loss > 0 ? `，少了 ${(loss * 100).toFixed(2)}% 原注` : ''}</div>
           <div class="table-wrap"><table><tr><th>動作</th><th>EV</th><th>勝</th><th>和</th><th>輸</th></tr>${['stand', 'hit', 'double', 'split', 'surrender'].filter(k => ev[k]).map(k =>
             `<tr><td class="${k === ev.best ? 'best' : ''}">${BJ.ACTION_LABEL[k]}</td><td class="${clsNum(ev[k].ev)}">${ev[k].ev.toFixed(4)}</td><td>${ui.pct(ev[k].w, 1, 1)}</td><td>${ui.pct(ev[k].p, 1, 1)}</td><td>${ui.pct(ev[k].l, 1, 1)}</td></tr>`).join('')}</table></div>
           <small class="muted">EV 以「規則與牌組」中的完整牌組計算（扣除這三張牌）。按 N 下一題。</small>`;
@@ -802,8 +1013,9 @@
           <div class="stat"><b>${ui.pct(sc.ok, sc.n, 1)}</b><span>正確率</span></div>
           ${Object.keys(sc.byType).map(k => `<div class="stat"><b>${ui.pct(sc.byType[k].ok, sc.byType[k].n, 1)}</b><span>${tl[k]}（${sc.byType[k].n} 題）</span></div>`).join('')}</div>
           <h4>錯題回顧（最近 50 題）</h4>${sc.wrong.length ? `<table><tr><th>你的牌</th><th>莊</th><th>你選</th><th>策略</th><th>EV最高</th></tr>${sc.wrong.map(w =>
-            `<tr><td>${w.cards.join(' ')}</td><td>${w.up}</td><td>${BJ.ACTION_LABEL[w.you]}</td><td>${BJ.ACTION_LABEL[w.sAns]}</td><td>${BJ.ACTION_LABEL[w.evBest]}</td></tr>`).join('')}</table>` : '<p class="muted">目前沒有錯題</p>'}</div>`;
+            `<tr><td>${w.cards.join(' ')}</td><td>${w.up}</td><td>${BJ.ACTION_LABEL[w.you]}</td><td>${(BJ.ACTION_LABEL[w.sAns] || '—')}</td><td>${BJ.ACTION_LABEL[w.evBest]}</td></tr>`).join('')}</table>` : '<p class="muted">目前沒有錯題</p>'}</div>`;
       }
+      return { renderQuizSeg: () => { fillStrat(strat); renderQuizSeg(); } };
     }
 
     /* ================================================================ */
@@ -811,7 +1023,20 @@
     /* ================================================================ */
     function buildStratPane(pane) {
       const C = BJ.cells;
-      const pick = stratSelect(S.sheet ? 'sheet' : 'ks', () => { segSel.value = ''; renderSegSel(); renderGrid(); });
+      // 切換策略前：目前策略有未儲存的修改就先詢問
+      let lastPick = null;
+      const pick = stratSelect(defStrat(), async v => {
+        const was = S.user.find(u => u.id === lastPick);
+        if (was && was.dirty) {
+          pick.value = lastPick;
+          if (!(await resolveDirty('切換到其他策略'))) return;
+          fillStrat(pick, v);
+        }
+        lastPick = pick.value;
+        segSel.value = ''; renderSegSel(); renderGrid(); updateDirty();
+      });
+      lastPick = pick.value;
+      const dirtyBar = h('div', { class: 'row' });
       const segSel = h('select', { onchange: () => renderGrid() });
       const segWrap = h('span', null, '牌況', segSel);
       const gridBox = h('div');
@@ -827,50 +1052,75 @@
       const cur = () => libEntry(pick.value);
       // 目前檢視的單一策略表（分段策略則為所選牌況）
       function viewed() {
-        const s = cur().get();
+        const e = cur();
+        if (!e) return null;
+        const s = e.get();
         if (!s.segmented) return s;
         const seg = s.segments.find(x => x.name === segSel.value);
         return seg ? seg.strat : s.base;
       }
       function renderSegSel() {
-        const s = cur().get();
+        const s = cur() && cur().get();
         segSel.innerHTML = '';
-        if (!s.segmented) { segWrap.style.display = 'none'; return; }
+        if (!s || !s.segmented) { segWrap.style.display = 'none'; return; }
         segWrap.style.display = '';
         segSel.appendChild(h('option', { value: '', text: '基本（不在任何分段時）' }));
         s.segments.forEach(x => segSel.appendChild(h('option', { value: x.name, text: `${x.name}（牌況值 ${KS.auth.segText(x)}）` })));
       }
-      function addUser(s, name) {
+      // 新策略：先放在畫面上，按「儲存」才寫入
+      async function addUser(s, name, from) {
+        if (!(await resolveDirty('建立新策略'))) return null;
         const copy = C.materialize(BJ.cloneStrategy(s));
         copy.name = name || copy.name;
         delete copy.builtin;
         const id = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        S.user.push({ id, s: copy });
-        saveUser();
-        pick.value = id;
-        renderSegSel(); renderGrid();
+        S.user.push({ id, s: copy, base: null, dirty: true, from: from || null });
+        refreshStratSelects();
+        pick.value = id; lastPick = id;
+        renderSegSel(); renderGrid(); updateDirty();
         return id;
+      }
+      // 策略管理頁的儲存列
+      function updateDirty() {
+        const u = S.user.find(x => x.id === pick.value);
+        dirtyBar.innerHTML = '';
+        if (!u) return;
+        if (!u.dirty) { dirtyBar.appendChild(h('span', { class: 'muted', text: ONLINE ? '✔ 已儲存到資料庫' : '✔ 已儲存在這台電腦' })); return; }
+        const n = u.base ? diffStrategy(u).length : 0;
+        dirtyBar.appendChild(h('span', { class: 'unsaved', text: u.base ? `● 有 ${n} 處未儲存的修改` : '● 新策略，還沒有儲存' }));
+        dirtyBar.appendChild(h('button', { class: 'btn-good', text: '💾 儲存', onclick: async () => {
+          const c = await askChanges(u, { title: '確認儲存', saveText: '💾 確認儲存', cancelText: '取消' });
+          if (c !== 'save') return;
+          try { await commit(u); flash('已儲存：' + u.s.name); } catch (e) { flash('儲存失敗：' + e.message, true); }
+        } }));
+        dirtyBar.appendChild(h('button', { class: 'btn-small', text: '↩ 放棄修改', onclick: async () => {
+          const c = await askChanges(u, { title: '放棄修改？', message: '以下修改會被丟掉，回到上次儲存的內容' + (u.base ? '' : '（這個新策略會被移除）') + '。', saveText: '💾 改成儲存', allowDiscard: true, discardText: '確定放棄', cancelText: '取消' });
+          if (c === 'save') { try { await commit(u); flash('已儲存：' + u.s.name); } catch (e) { flash('儲存失敗：' + e.message, true); } }
+          else if (c === 'discard') { discard(u); lastPick = pick.value; renderSegSel(); renderGrid(); flash('已放棄修改'); }
+        } }));
+        dirtyBar.appendChild(h('button', { class: 'btn-small', text: '查看修改', onclick: () => askChanges(u, { title: '這次的修改', saveText: '💾 儲存', cancelText: '關閉' }).then(async c => { if (c === 'save') { try { await commit(u); flash('已儲存：' + u.s.name); } catch (e) { flash('儲存失敗：' + e.message, true); } } }) }));
       }
       async function importFile(f) {
         try {
           const obj = await ui.readJsonFile(f);
           const s = BJ.normalizeStrategy(obj);
-          addUser(s, obj.name || f.name.replace(/\.json$/i, ''));
+          if (!(await addUser(s, obj.name || f.name.replace(/\.json$/i, ''), '匯入檔案 ' + f.name))) return;
           if (Array.isArray(obj.boostSequence) && obj.boostSequence.length) {
             S.boostSeq = obj.boostSequence.map(Number).filter(x => x > 0);
             store.set('ks_boost_sequence_v1', S.boostSeq);
-            flash(`已匯入策略「${f.name}」，並套用檔案中的智慧加注序列（重新整理後顯示）`);
-          } else flash(`已匯入策略「${f.name}」`);
+            flash(`已匯入策略「${f.name}」（尚未儲存），並套用檔案中的智慧加注序列`);
+          } else flash(`已匯入策略「${f.name}」，確認內容後請按「💾 儲存」`);
         } catch (e) { flash('匯入失敗：' + e.message, true); }
       }
       pane.appendChild(h('div', { class: 'panel' },
         h('div', { class: 'row' }, '策略', pick, segWrap,
-          h('button', { class: 'btn-small', text: '複製成新策略（可編輯）', onclick: () => { const n = prompt('新策略名稱', viewed().name.replace(/（.*）/, '') + ' 副本'); if (n) { addUser(viewed(), n); flash('已建立：' + n); } } }),
-          h('button', { class: 'btn-small', text: '重新命名', onclick: () => { const e = cur(); if (e.builtin) return flash('內建策略不能改名，請先複製', true); const n = prompt('新名稱', e.name); if (n) { e.get().name = n; saveUser(); renderGrid(); } } }),
-          h('button', { class: 'btn-small', text: '刪除', onclick: () => { const e = cur(); if (e.builtin) return flash('內建策略不能刪除', true); if (!confirm(`刪除「${e.name}」？`)) return; S.user = S.user.filter(u => u.id !== e.id); saveUser(); pick.value = S.sheet ? 'sheet' : 'ks'; renderSegSel(); renderGrid(); } }),
-          h('button', { class: 'btn-small', text: '⬇ 匯出 JSON', onclick: () => { const v = viewed(); ui.download(`ks_rules_${v.name.replace(/[\\/:*?"<>|（）()［］ ]+/g, '_')}.json`, JSON.stringify(BJ.exportStrategy(v, { boostSequence: S.boostSeq }), null, 2)); } })),
-        drop, fileInp, msg,
-        h('small', { class: 'muted', text: '「試算表策略」來自 Google 試算表（唯讀，請直接改試算表後按上方「重新載入試算表」）。其他人的策略可以匯入後在「模擬」中讓不同玩家各用一套比較勝率。' })));
+          h('button', { class: 'btn-good', text: '＋ 新增空白策略', onclick: () => { const n = prompt('新策略名稱', '我的策略'); if (n) addUser(BJ.blankStrategy(n), n, '空白').then(id => { if (id) flash('已建立「' + n + '」：點格子（或點左邊的列名稱一次設定整列）填完後按「💾 儲存」'); }); } }),
+          h('button', { class: 'btn-small', text: '複製成新策略（可編輯）', onclick: () => { if (!viewed()) return flash('目前沒有可以複製的策略', true); const n = prompt('新策略名稱', viewed().name.replace(/（.*）/, '') + ' 副本'); if (n) { const from = viewed().name; addUser(viewed(), n, from).then(id => { if (id) flash('已建立「' + n + '」，編輯後請按「💾 儲存」'); }); } } }),
+          h('button', { class: 'btn-small', text: '重新命名', onclick: () => { const e = cur(); if (!e || e.builtin) return flash('內建策略不能改名，請先複製', true); const n = prompt('新名稱', e.name); if (n) { e.get().name = n; markDirty(e.id); renderGrid(); } } }),
+          h('button', { class: 'btn-small', text: '刪除', onclick: () => { const e = cur(); if (!e || e.builtin) return flash('內建策略不能刪除', true); if (!confirm(`刪除「${e.get().name}」？${ONLINE ? '（會從資料庫刪除）' : ''}`)) return; removeUser(e.id); fillStrat(pick, defStrat()); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); } }),
+          h('button', { class: 'btn-small', text: '⬇ 匯出 JSON', onclick: () => { const v = viewed(); if (!v) return; ui.download(`ks_rules_${v.name.replace(/[\\/:*?"<>|（）()［］ ]+/g, '_')}.json`, JSON.stringify(BJ.exportStrategy(v, { boostSequence: S.boostSeq }), null, 2)); } })),
+        dirtyBar, drop, fileInp, msg,
+        h('small', { class: 'muted', text: '修改策略後要按「💾 儲存」才會寫入' + (ONLINE ? '資料庫' : '這台電腦') + '；還沒儲存就離開時會提醒你。「資料庫策略」是唯讀的，請直接改資料庫後按上方「重新讀取資料庫」。' })));
       pane.appendChild(gridBox);
 
       const LABEL = { H: 'H', S: 'S', Dh: 'D', Ds: 'Ds', Rh: 'R', Rs: 'Rs', P: 'P', D: 'D', R: 'R', '-': '·', Y: '收', N: '不收' };
@@ -884,37 +1134,66 @@
       }
       function renderGrid() {
         const e = cur();
+        gridBox.innerHTML = '';
+        if (!e) {
+          gridBox.appendChild(h('div', { class: 'panel' }, h('h3', { text: '還沒有策略' }),
+            h('p', { text: '按上方「＋ 新增空白策略」建立自己的策略，每一格都填完後按「💾 儲存」。' })));
+          return;
+        }
         const s = viewed();
         const editable = !e.builtin;
-        gridBox.innerHTML = '';
         const legend = '<small class="muted">H=要牌　S=停牌　D=可加倍就加倍否則要牌　Ds=可加倍就加倍否則停牌　R=可投降就投降否則要牌　Rs=投降否則停牌　P=分牌　·=對子不特別處理（依點數表）</small>' +
           (S.rules.freeDouble ? '<div class="hint">💰 加倍分兩種，由點數自動決定：<b>免D</b> = 兩張硬 9/10/11 <b>免費加倍</b>（贏賠 2 倍注、輸只輸原注）；<b>自D</b> = 其他點數（硬 12 以上、軟牌 A+x、對子）<b>自費加倍</b>（放同額籌碼）。兩種都只補一張。<br>在格子填 D 就是「這手要加倍」；想要「只在免費時加倍、需要自費就不加」，在自費的格子改填 H 或 S 即可。</div>' : '');
+        const miss = BJ.missingCells(s), need = BJ.requiredTotal();
         gridBox.appendChild(h('div', { class: 'panel' },
-          h('h3', { text: `${s.name}${editable ? '（點格子切換動作）' : '（唯讀 — 請先「複製成新策略」再編輯）'}` }),
+          h('h3', { text: `${s.name}${editable ? '（點格子切換動作，點左邊的列名稱一次設定整列）' : '（唯讀 — 請先「複製成新策略」再編輯）'}` }),
+          s.partial ? h('div', { class: miss ? 'hint' : 'okbox', text: miss ? `已填 ${need - miss} / ${need} 格，還有 ${miss} 格（顯示「？」）要填，填完才能模擬、當建議或測驗標準` : `✔ ${need} 格都填完了` }) : null,
           h('div', { html: legend })));
         const section = (title, kind, rows, getCode, setCode, cols) => {
           cols = cols || BJ.DEALER_VALS;
           const tbl = h('table', { class: 'strat' });
           tbl.appendChild(h('tr', null, h('th', { text: '玩家 \\ 莊家' }), cols.map(d => h('th', { text: DEALER_LABEL(d) }))));
+          const codeAt = (key, d) => (C.isFilled(s, kind, key, d) ? getCode(s, key, d) : '?');
+          const cls = c => `cell c-${c === 'Y' ? 'P' : c === 'N' ? '-' : c === '?' ? 'Q' : c}`;
+          const nextCode = c => { const cyc = C.CYCLE[kind]; return c === '?' ? cyc[0] : cyc[(cyc.indexOf(c) + 1) % cyc.length]; };
           rows.forEach(([key, label]) => {
-            const tr = h('tr', null, h('th', { text: label }));
+            const th = h('th', { text: label, class: editable ? 'row-head' : '', title: editable ? '點一下：整列一起切換' : '' });
+            const tr = h('tr', null, th);
+            const tds = [];
             cols.forEach(d => {
-              const code = getCode(s, key, d);
-              const td = h('td', { class: `cell c-${code === 'Y' ? 'P' : code === 'N' ? '-' : code}`, text: cellLabel(kind, key, code) });
+              const code = codeAt(key, d);
+              const td = h('td', { class: cls(code), text: code === '?' ? '？' : cellLabel(kind, key, code) });
+              const paint = () => { const c2 = codeAt(key, d); td.className = cls(c2); td.textContent = c2 === '?' ? '？' : cellLabel(kind, key, c2); };
               td.addEventListener('click', () => {
                 if (!editable) { flash('唯讀策略不能修改，請先「複製成新策略」', true); return; }
-                const cyc = C.CYCLE[kind];
-                setCode(s, key, d, cyc[(cyc.indexOf(getCode(s, key, d)) + 1) % cyc.length]);
-                saveUser();
-                const c2 = getCode(s, key, d);
-                td.className = `cell c-${c2 === 'Y' ? 'P' : c2 === 'N' ? '-' : c2}`; td.textContent = cellLabel(kind, key, c2);
+                setCode(s, key, d, nextCode(codeAt(key, d)));
+                markDirty(e.id);
+                paint();
+                if (s.partial) renderProgress();
               });
+              tds.push(paint);
               tr.appendChild(td);
+            });
+            th.addEventListener('click', () => {
+              if (!editable) return;
+              const nx = nextCode(codeAt(key, cols[0]));
+              cols.forEach(d => setCode(s, key, d, nx));
+              markDirty(e.id);
+              tds.forEach(p => p());
+              if (s.partial) renderProgress();
             });
             tbl.appendChild(tr);
           });
           gridBox.appendChild(h('div', { class: 'panel' }, h('h4', { text: title }), h('div', { class: 'table-wrap' }, tbl)));
         };
+        // 填格子時即時更新進度（不重畫整張表）
+        function renderProgress() {
+          const box = gridBox.querySelector('.hint, .okbox');
+          if (!box) return;
+          const m = BJ.missingCells(s);
+          box.className = m ? 'hint' : 'okbox';
+          box.textContent = m ? `已填 ${need - m} / ${need} 格，還有 ${m} 格（顯示「？」）要填，填完才能模擬、當建議或測驗標準` : `✔ ${need} 格都填完了`;
+        }
         const hardRows = []; for (let t = 21; t >= 4; t--) hardRows.push([t, '硬 ' + t]);
         const softRows = []; for (let t = 21; t >= 13; t--) softRows.push([t, `A,${t - 11}（軟${t}）`]);
         const pairRows = []; for (let pv = 11; pv >= 2; pv--) pairRows.push([pv, pv === 11 ? 'A,A' : `${pv},${pv}`]);
@@ -931,6 +1210,8 @@
       }
       renderSegSel();
       renderGrid();
+      updateDirty();
+      return { refresh: () => { fillStrat(pick); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); }, updateDirty };
     }
   }
 

@@ -376,10 +376,42 @@
     });
     if (o.builtin) s.builtin = o.builtin;
     if (o.evenMoneyMap) { s.evenMoneyMap = {}; Object.keys(o.evenMoneyMap).forEach(k => { s.evenMoneyMap[k] = !!o.evenMoneyMap[k]; }); }
+    if (o.partial) {
+      s.partial = true;
+      s.filled = {};
+      ['hard', 'soft', 'pair'].forEach(k => { s.filled[k] = fix(o.filled && o.filled[k]); });
+    }
     return s;
   }
 
-  /* ---------------- 策略表格格子（UI 與試算表共用） ----------------
+  /* ---------------- 空白策略（玩家自己填） ----------------
+     partial=true 的策略會記錄每一格是否已填；必填：硬 4–20、軟 A2–A9（13–20）、對子 2–A，共 350 格
+     21 點會自動停牌不需填；加倍後投降預設不投降、保險預設不收 */
+  const REQUIRED = { hard: [4, 20], soft: [13, 20], pair: [2, 11] };
+  function blankStrategy(name) {
+    const s = normalizeStrategy({ name: name || '空白策略', pairRulesMap: {}, hitMap: {} });
+    s.partial = true;
+    s.filled = { hard: {}, soft: {}, pair: {} };
+    Object.keys(s.filled).forEach(k => DEALER_VALS.forEach(d => { s.filled[k][d] = []; }));
+    s.evenMoneyMap = { 10: false, 11: false };
+    // 21 點會自動停牌，不需要填
+    DEALER_VALS.forEach(d => { cells.setHard(s, 21, d, 'S'); cells.setSoft(s, 21, d, 'S'); });
+    return s;
+  }
+  function missingCells(strat) {
+    if (!strat) return 0;
+    if (strat.segmented) return [strat.base, ...strat.segments.map(x => x.strat)].reduce((a, st) => Math.max(a, missingCells(st)), 0);
+    if (!strat.partial) return 0;
+    let n = 0;
+    Object.keys(REQUIRED).forEach(kind => {
+      const [lo, hi] = REQUIRED[kind];
+      DEALER_VALS.forEach(d => { for (let k = lo; k <= hi; k++) if (!(strat.filled[kind][d] || []).includes(k)) n++; });
+    });
+    return n;
+  }
+  const requiredTotal = () => Object.keys(REQUIRED).reduce((a, k) => a + (REQUIRED[k][1] - REQUIRED[k][0] + 1) * DEALER_VALS.length, 0);
+
+  /* ---------------- 策略表格格子（UI 與資料庫共用） ----------------
      硬牌：H S Dh Ds Rh Rs｜軟牌：H S Dh Ds｜對子：- P H S D R｜加倍後投降：- R｜保險：Y N */
   const cells = (function () {
     const rm = (arr, x) => { const i = arr.indexOf(x); if (i >= 0) arr.splice(i, 1); };
@@ -412,18 +444,30 @@
     }
     const daCode = (s, t, d) => ((s.dasurrenderMap[d] || []).includes(t) ? 'R' : '-');
     const evenCode = (s, d) => (s.evenMoneyMap && s.evenMoneyMap[d] ? 'Y' : 'N');
+    function isFilled(s, kind, key, d) {
+      if (!s.partial || !s.filled || !s.filled[kind]) return true;
+      return (s.filled[kind][d] || []).includes(key);
+    }
+    function markFilled(s, kind, key, d) {
+      if (!s.partial || !s.filled || !s.filled[kind]) return;
+      const a = s.filled[kind][d] || (s.filled[kind][d] = []);
+      add(a, key);
+    }
     function setHard(s, t, d, code) {
+      markFilled(s, 'hard', t, d);
       [s.hitMap[d], s.standMap[d], s.hardDoubleMap[d], s.surrenderMap[d]].forEach(a => rm(a, t));
       add(code === 'H' || code.endsWith('h') ? s.hitMap[d] : s.standMap[d], t);
       if (code[0] === 'D') add(s.hardDoubleMap[d], t);
       if (code[0] === 'R') add(s.surrenderMap[d], t);
     }
     function setSoft(s, t, d, code) {
+      markFilled(s, 'soft', t, d);
       rm(s.softHitMap[d], t); rm(s.softDoubleMap[d], t);
       if (code === 'H' || code === 'Dh') add(s.softHitMap[d], t);
       if (code[0] === 'D') add(s.softDoubleMap[d], t);
     }
     function setPair(s, pv, d, code) {
+      markFilled(s, 'pair', pv, d);
       const pr = s.pairRulesMap[d];
       ['split', 'double', 'surrender', 'stand', 'hit'].forEach(k => rm(pr[k], pv));
       const k = { P: 'split', D: 'double', R: 'surrender', S: 'stand', H: 'hit' }[code];
@@ -444,7 +488,7 @@
       return s;
     }
     const CYCLE = { hard: ['H', 'S', 'Dh', 'Ds', 'Rh', 'Rs'], soft: ['H', 'S', 'Dh', 'Ds'], pair: ['-', 'P', 'H', 'S', 'D', 'R'], da: ['-', 'R'], even: ['N', 'Y'] };
-    // 試算表代碼正規化：D=Dh、R=Rh、大小寫皆可
+    // 資料庫代碼正規化：D=Dh、R=Rh、大小寫皆可
     function normCode(kind, raw) {
       let c = String(raw || '').trim();
       if (!c) return null;
@@ -458,7 +502,7 @@
       if (up === 'H' || up === 'S') return up;
       return null;
     }
-    return { hardHit, softHit, hardCode, softCode, pairCode, daCode, evenCode, setHard, setSoft, setPair, setDA, setEven, materialize, CYCLE, normCode };
+    return { hardHit, softHit, hardCode, softCode, pairCode, daCode, evenCode, setHard, setSoft, setPair, setDA, setEven, materialize, CYCLE, normCode, isFilled, markFilled };
   })();
 
   const cloneStrategy = s => {
@@ -474,6 +518,7 @@
       name: s.name, pairRulesMap: s.pairRulesMap, doubleMap, hardDoubleMap: s.hardDoubleMap, softDoubleMap: s.softDoubleMap,
       hitMap: s.hitMap, softHitMap: s.softHitMap, standMap: s.standMap, surrenderMap: s.surrenderMap,
       dasurrenderMap: s.dasurrenderMap, evenMoney: s.evenMoney, evenMoneyTC: s.evenMoneyTC, evenMoneyMap: s.evenMoneyMap,
+      partial: s.partial || undefined, filled: s.partial ? s.filled : undefined,
       meta: { exportedAt: new Date().toISOString(), format: 'ks-strategy-v2' }
     }, extra || {});
   }
@@ -906,7 +951,7 @@
         const tb = S.tc[tcKey] || (S.tc[tcKey] = { n: 0, units: 0, w: 0, l: 0 });
         tb.n++; tb.units += seat.net / cfg.seats[i].bet;
         if (seat.result === 'W') tb.w++; else if (seat.result === 'L') tb.l++;
-        // 依牌況分段統計（試算表分段策略）
+        // 依牌況分段統計（資料庫分段策略）
         const segName = cfg.seats[i].strategy.segmented ? (pickSegment(cfg.seats[i].strategy, { tc }).seg || { name: '基本' }).name : null;
         if (segName) {
           const sb = S.seg[segName] || (S.seg[segName] = { n: 0, units: 0, w: 0, l: 0 });
@@ -938,6 +983,7 @@
   KS.BJ = {
     BASE_RULES, PRESETS, RULE_FIELDS, OUTCOMES, DEALER_VALS, ACTION_LABEL,
     handInfo, handTotal, isTwoCard21, is777or678, Round, decide, pickSegment, cells, cloneStrategy, normalizeStrategy, exportStrategy,
+    blankStrategy, missingCells, requiredTotal, REQUIRED,
     ksDefaultStrategy, dealerDist, standVec, evaluate, toCounts10, generateOptimalStrategy, Simulator, parseRamp
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = KS;

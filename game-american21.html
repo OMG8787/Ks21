@@ -37,7 +37,7 @@
   <script src="ks-blackjack.js"></script>
   <script src="ks-auth.js"></script>
   <script src="ks-blackjack-ui.js"></script>
-  <script>KS.BJUI.init({ preset: 'american', mount: 'app' });</script>
+  <script>KS.auth.start('american', () => KS.BJUI.init({ preset: 'american', mount: 'app' }));</script>
 </body>
 
 </html>
