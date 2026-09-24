@@ -45,9 +45,17 @@
     function loadSavedFromSheet() {
       const list = [];
       KS.auth.savedStrategies().forEach(x => {
+        if (x.obj && x.obj.kind === 'combo') return; // 算牌組合另外讀
         try { const st = BJ.normalizeStrategy(x.obj); st.name = x.name || st.name; list.push({ id: x.sid, s: st }); } catch (e) { /* 略過壞資料 */ }
       });
       return list;
+    }
+    // 算牌組合：{ id, combo:true, c:{ kind:'combo', name, method, rules }, base: 上次儲存的 JSON, dirty }
+    function loadCombos() {
+      const src = ONLINE
+        ? KS.auth.savedStrategies().filter(x => x.obj && x.obj.kind === 'combo').map(x => ({ id: x.sid, c: Object.assign({}, x.obj, { name: x.name || x.obj.name }) }))
+        : store.get(K('combos'), []).map(x => ({ id: x.id, c: x }));
+      return src.map(x => { const c = Object.assign({ kind: 'combo', method: 'tc', rules: [] }, x.c); delete c.id; return { id: x.id, combo: true, c, base: JSON.stringify(c), dirty: false }; });
     }
     if (ONLINE) {
       S.user = loadSavedFromSheet();
@@ -56,6 +64,8 @@
         try { S.user.push({ id: x.id || ('u' + Math.random().toString(36).slice(2)), s: BJ.normalizeStrategy(x) }); } catch (e) { /* 略過壞資料 */ }
       });
     }
+
+    S.combos = loadCombos();
 
     // 資料庫：玩家策略、算牌系統、牌況分段、智慧加注序列
     let sheetRes = null;
@@ -77,7 +87,36 @@
     S.user.forEach(u => { u.base = snap(u.s); u.dirty = false; });
     let stratPane = null;
     const saveLocal = () => store.set(K('strats'), S.user.filter(u => u.base).map(u => Object.assign({}, u.base, { id: u.id })));
-    const dirtyList = () => S.user.filter(u => u.dirty);
+    const dirtyList = () => S.user.filter(u => u.dirty).concat(S.combos.filter(c => c.dirty));
+    let comboEd = null;
+    const saveLocalCombos = () => store.set(K('combos'), S.combos.filter(x => x.base).map(x => Object.assign(JSON.parse(x.base), { id: x.id })));
+    async function commitCombo(ce) {
+      const obj = JSON.parse(JSON.stringify(ce.c)); obj.kind = 'combo';
+      if (ONLINE) {
+        KS.auth.status('儲存中…');
+        await KS.auth.saveStrategy(preset, ce.id, obj.name, obj);
+        KS.auth.status('✔ 已儲存到資料庫 ' + new Date().toLocaleTimeString());
+      }
+      ce.base = JSON.stringify(obj); ce.dirty = false;
+      if (!ONLINE) saveLocalCombos();
+      refreshComboSelects();
+      if (comboEd) comboEd.refresh();
+    }
+    function discardCombo(ce) {
+      if (!ce.base) S.combos = S.combos.filter(x => x !== ce);
+      else { ce.c = JSON.parse(ce.base); ce.dirty = false; }
+      refreshComboSelects();
+      if (comboEd) comboEd.refresh();
+    }
+    async function removeCombo(ce) {
+      S.combos = S.combos.filter(x => x !== ce);
+      refreshComboSelects();
+      if (!ce.base) return;
+      if (!ONLINE) { saveLocalCombos(); return; }
+      KS.auth.status('刪除中…');
+      try { await KS.auth.deleteStrategy(preset, ce.id); KS.auth.status('✔ 已從資料庫刪除'); }
+      catch (e) { KS.auth.status('⚠️ ' + e.message, true); }
+    }
     function markDirty(id) {
       const u = S.user.find(x => x.id === id);
       if (!u) return;
@@ -86,6 +125,7 @@
       if (stratPane) stratPane.updateDirty();
     }
     async function commit(u) {
+      if (u.combo) return commitCombo(u);
       const obj = snap(u.s);
       if (ONLINE) {
         KS.auth.status('儲存中…');
@@ -98,6 +138,7 @@
       if (stratPane) stratPane.updateDirty();
     }
     function discard(u) {
+      if (u.combo) return discardCombo(u);
       if (!u.base) S.user = S.user.filter(x => x !== u);
       else { u.s = BJ.cells.materialize(BJ.normalizeStrategy(JSON.parse(JSON.stringify(u.base)))); u.dirty = false; }
       refreshStratSelects();
@@ -145,7 +186,7 @@
     // 提醒視窗：列出修改內容；回傳 'save' | 'discard' | 'cancel'
     function askChanges(u, opt) {
       return new Promise(resolve => {
-        const list = diffStrategy(u);
+        const list = u.combo ? diffCombo(u) : diffStrategy(u);
         const shown = list.slice(0, 40);
         const done = v => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
         const onKey = e => { if (e.key === 'Escape') done('cancel'); };
@@ -158,7 +199,7 @@
             h('div', { class: 'ks-modal-head' }, h('strong', { text: opt.title })),
             h('div', { class: 'ks-modal-body' },
               opt.message ? h('p', { text: opt.message, style: { marginTop: 0 } }) : null,
-              h('p', { html: `策略「<b>${ui.esc(u.s.name)}</b>」${u.base ? `共有 <b>${list.length}</b> 處修改：` : ''}` }),
+              h('p', { html: `${u.combo ? '算牌組合' : '策略'}「<b>${ui.esc(u.combo ? u.c.name : u.s.name)}</b>」${u.base ? `共有 <b>${list.length}</b> 處修改：` : ''}` }),
               h('ul', { class: 'change-list' }, shown.map(t => h('li', { text: t }))),
               list.length > shown.length ? h('p', { class: 'muted', text: `…還有 ${list.length - shown.length} 處` }) : null,
               h('p', { class: 'muted', text: ONLINE ? '儲存後會寫入 資料庫的「我的策略」。' : '儲存後會存在這台電腦（本機模式）。' }),
@@ -170,7 +211,7 @@
     // 有未儲存的修改時詢問；回傳 true 表示可以繼續
     async function resolveDirty(reason) {
       for (const u of dirtyList()) {
-        const c = await askChanges(u, { title: '策略還沒有儲存', message: `你要${reason}，但以下修改還沒有儲存。要儲存嗎？`, allowDiscard: true, cancelText: '取消（留在這裡）' });
+        const c = await askChanges(u, { title: (u.combo ? '算牌組合' : '策略') + '還沒有儲存', message: `你要${reason}，但以下修改還沒有儲存。要儲存嗎？`, allowDiscard: true, cancelText: '取消（留在這裡）' });
         if (c === 'cancel') return false;
         if (c === 'discard') { discard(u); continue; }
         try { await commit(u); }
@@ -200,12 +241,80 @@
     const libEntry = id => library().find(x => x.id === id) || library()[0] || null;
     const getStrat = id => { const e = libEntry(id); return e ? e.get() : null; };
     const defStrat = () => { const l = library(); return l.length ? l[0].id : ''; };
+    // 算牌組合
+    const METHOD_SHORT = { tc: 'TC', rc: 'RC', big: '本局大牌', small: '本局小牌' };
+    const numOr = (x, def) => (x === null || x === undefined || x === '' || !isFinite(+x) ? def : +x);
+    function rangeText(lo, hi, method) {
+      const u = method === 'big' || method === 'small' ? ' 張' : '';
+      if (lo === -Infinity && hi === Infinity) return '任何值';
+      if (lo === -Infinity) return `≤ ${hi}${u}`;
+      if (hi === Infinity) return `≥ ${lo}${u}`;
+      return lo === hi ? `= ${lo}${u}` : `${lo}～${hi}${u}`;
+    }
+    const strictEntry = id => (id ? library().find(x => x.id === id) || null : null);
+    const strictStrat = id => { const e = strictEntry(id); return e ? e.get() : null; };
+    const stratName = id => { const e = strictEntry(id); return e ? e.get().name : (id ? '（已刪除或沒有權限）' : '（未選擇）'); };
+    const comboEntry = id => (id ? S.combos.find(x => x.id === id) || null : null);
+    // 左邊選的策略 ＋ 算牌組合 → 實際使用的策略
+    function resolveFor(stratId, comboId) {
+      const base = getStrat(stratId);
+      const ce = comboEntry(comboId);
+      if (!base || !ce) return base;
+      return BJ.resolveCombo(base, ce.c, strictStrat);
+    }
+    function effName(stratId, comboId) {
+      const e = libEntry(stratId), ce = comboEntry(comboId);
+      return (e ? e.get().name : '—') + (ce ? ' ＋ 算牌：' + ce.c.name : '');
+    }
+    function diffCombo(ce) {
+      if (!ce.base) return [`新的算牌組合「${ce.c.name}」，還沒有儲存過`];
+      const o = JSON.parse(ce.base), n = ce.c, out = [];
+      const mo = o.method || 'tc', mn = n.method || 'tc';
+      if (o.name !== n.name) out.push(`名稱：「${o.name}」→「${n.name}」`);
+      if (mo !== mn) out.push(`計算方式：${BJ.COMBO_METHODS[mo]} → ${BJ.COMBO_METHODS[mn]}`);
+      const desc = (r, m) => `${r.name || '（未命名）'}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)} → ${stratName(r.use)}`;
+      const a = o.rules || [], b = n.rules || [];
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        if (!a[i]) out.push(`新增條件 ${i + 1}：${desc(b[i], mn)}`);
+        else if (!b[i]) out.push(`刪除條件 ${i + 1}：${desc(a[i], mo)}`);
+        else if (JSON.stringify(a[i]) !== JSON.stringify(b[i]) || mo !== mn) out.push(`條件 ${i + 1}：${desc(a[i], mo)} → ${desc(b[i], mn)}`);
+      }
+      return out.length ? out : ['（內容和已儲存的相同）'];
+    }
+    const comboSelects = new Set();
+    function comboSelect(value, onchange) {
+      const s = h('select', { class: 'combo-select', title: '在左邊的策略上外加算牌：牌況符合條件時改用指定的策略', onchange: () => onchange && onchange(s.value) });
+      fillCombo(s, value || '');
+      comboSelects.add(s);
+      return s;
+    }
+    function fillCombo(s, value) {
+      const v = value !== undefined ? value : s.value;
+      s.innerHTML = '';
+      s.appendChild(h('option', { value: '', text: '不使用（預設）' }));
+      S.combos.forEach(ce => s.appendChild(h('option', { value: ce.id, text: `${ce.c.name}（依${METHOD_SHORT[ce.c.method || 'tc']}）${ce.dirty ? '（● 未儲存）' : ''}` })));
+      s.value = S.combos.some(c => c.id === v) ? v : '';
+    }
+    function refreshComboSelects() { comboSelects.forEach(s => fillCombo(s)); }
     // 策略能不能拿來模擬／建議／當標準答案：要存在且全部填完
-    function unusable(id) {
+    function unusable(id, comboId) {
       const e = libEntry(id);
       if (!e) return '還沒有策略，請先到「📋 策略管理」按「＋ 新增空白策略」並填完';
       const m = BJ.missingCells(e.get());
-      return m ? `策略「${e.get().name}」還有 ${m} 格沒填，填完才能使用` : null;
+      if (m) return `策略「${e.get().name}」還有 ${m} 格沒填，填完才能使用`;
+      if (comboId) {
+        const ce = comboEntry(comboId);
+        if (!ce) return '選擇的算牌組合已不存在，請重新選擇';
+        for (let i = 0; i < (ce.c.rules || []).length; i++) {
+          const r = ce.c.rules[i], nm = r.name || '條件' + (i + 1);
+          if (!r.use) return `算牌組合「${ce.c.name}」的條件「${nm}」還沒選要改用的策略`;
+          const st = strictStrat(r.use);
+          if (!st) return `算牌組合「${ce.c.name}」的條件「${nm}」使用的策略已刪除或沒有權限`;
+          const mm = BJ.missingCells(st);
+          if (mm) return `算牌組合「${ce.c.name}」的條件「${nm}」使用的策略「${st.name}」還有 ${mm} 格沒填`;
+        }
+      }
+      return null;
     }
     const stratSelects = new Set();
     function stratSelect(value, onchange) {
@@ -222,7 +331,7 @@
       lib.forEach(e => s.appendChild(h('option', { value: e.id, text: e.name })));
       s.value = lib.some(e => e.id === v) ? v : lib[0].id;
     }
-    function refreshStratSelects() { stratSelects.forEach(s => fillStrat(s)); }
+    function refreshStratSelects() { stratSelects.forEach(s => fillStrat(s)); if (comboEd) comboEd.refresh(); }
 
     /* ============ 版面 ============ */
     mount.innerHTML = '';
@@ -269,6 +378,9 @@
         applySheet();
         S.user = loadSavedFromSheet();
         S.user.forEach(u => { u.base = snap(u.s); u.dirty = false; });
+        S.combos = loadCombos();
+        refreshComboSelects();
+        if (comboEd) comboEd.refresh();
         updateHeader();
         refreshStratSelects();
         simPane.setBoost(S.boostSeq);
@@ -340,7 +452,7 @@
         });
       }
       renderTags();
-      const seed = h('input', { type: 'text', placeholder: '空白 = 隨機', style: { width: '120px' }, onchange: () => KS.setSeed(seed.value.trim()) });
+      const seed = h('input', { type: 'text', placeholder: '空白 = 隨機', style: { width: '120px' }, onchange: () => { S.seed = seed.value.trim(); KS.setSeed(S.seed); } });
       pane.appendChild(deckBox);
       pane.appendChild(h('div', { class: 'panel' }, h('h3', { text: '算牌系統' }),
         h('div', { class: 'row' }, '系統', sysSel, S.sheet && sheetRes.countSystem ? h('b', { text: '（目前由資料庫指定）' }) : null, h('small', { class: 'muted', text: '選「自訂」即可編輯每張牌的權重。KO 為非平衡系統（直接看 RC）。' })),
@@ -356,7 +468,7 @@
       const seats = [];
       const SEAT_KEY = K('seats') + (ONLINE ? '_' + KS.auth.user.id : '');
       const saved = store.get(SEAT_KEY, [{ bet: 500, mode: 'fixed', strat: defStrat() }]);
-      const saveSeats = () => store.set(SEAT_KEY, seats.map(r => ({ bet: +r.bet.value, mode: r.mode.value, strat: r.strat.value })));
+      const saveSeats = () => store.set(SEAT_KEY, seats.map(r => ({ bet: +r.bet.value, mode: r.mode.value, strat: r.strat.value, combo: r.combo ? r.combo.value : '' })));
       function addSeat(pre) {
         if (seats.length >= 7) { alert('最多 7 位玩家'); return; }
         pre = pre || {};
@@ -364,10 +476,11 @@
         r.bet = h('input', { type: 'number', min: 1, value: pre.bet || 500, onchange: saveSeats });
         r.mode = sel([['fixed', '固定下注'], ['boost', '智慧加注序列'], ['ramp', '依 True Count 加注']], pre.mode || 'fixed', saveSeats);
         r.strat = stratSelect(pre.strat || defStrat(), saveSeats);
+        r.combo = comboSelect(pre.combo || '', saveSeats);
         const ro = [['', '隨機']].concat(KS.RANKS.map(x => [x, x]));
         r.c1 = sel(ro, ''); r.c2 = sel(ro, '');
         r.label = h('b');
-        r.row = h('div', { class: 'row' }, r.label, '下注', r.bet, r.mode, '策略', r.strat, '固定起手牌', r.c1, r.c2);
+        r.row = h('div', { class: 'row' }, r.label, '下注', r.bet, r.mode, '策略', r.strat, '算牌方式', r.combo, '固定起手牌', r.c1, r.c2);
         seats.push(r);
         seatBox.appendChild(r.row);
         relabel(); saveSeats();
@@ -385,6 +498,7 @@
       boostInp.addEventListener('change', boostApply);
       const rampInp = h('input', { type: 'text', value: S.ramp, style: { width: '260px' }, onchange: () => { S.ramp = rampInp.value; store.set(K('ramp'), S.ramp); } });
       const rounds = h('input', { type: 'number', min: 1, value: store.get(K('rounds'), 100000), onchange: () => store.set(K('rounds'), +rounds.value) });
+      const cmpChk = h('input', { type: 'checkbox', checked: store.get(K('cmp'), true), onchange: () => store.set(K('cmp'), cmpChk.checked) });
       const logLimit = h('input', { type: 'number', min: 0, max: 20000, value: 500 });
       const bar = h('div'); const prog = h('div', { class: 'progress' }, bar); const progText = h('span', { class: 'muted' });
       const runBtn = h('button', { text: '▶ 開始模擬', onclick: run });
@@ -403,45 +517,65 @@
           h('button', { class: 'btn-small', text: '還原預設', onclick: () => { boostInp.value = '300,500,800,1200,1800,2700,4000,6000'; boostApply(); } })),
         h('div', { class: 'row' }, 'True Count 加注表（TC:倍數）', rampInp, h('small', { class: 'muted', text: '例：2:2 表示 TC≥2 下 2 倍基本注' })),
         h('div', { class: 'row' }, '模擬局數', rounds, '　記錄前', logLimit, '局的過程'),
+        h('div', { class: 'row' }, h('label', null, cmpChk, '有使用算牌方式的玩家，同時模擬「不使用算牌」的版本（用同一串牌對照）')),
         h('div', { class: 'row' }, runBtn, stopBtn, prog, progText)));
       pane.appendChild(out);
 
       const api = { setBoost: seq => { boostInp.value = seq.join(','); } };
+      function runOnce(sm, n, label) {
+        return KS.runChunked(n, () => sm.step(), {
+          shouldStop: () => stop,
+          onProgress: (i, t) => { bar.style.width = (i / t * 100).toFixed(1) + '%'; progText.textContent = `${label}${i.toLocaleString()} / ${t.toLocaleString()} 局`; }
+        });
+      }
       async function run() {
         const n = Math.max(1, parseInt(rounds.value, 10) || 1);
-        let cfg, sim;
+        let cfg, sim, compare = false, seedNum = 0;
         try {
-          seats.forEach((r, i) => { const bad = unusable(r.strat.value); if (bad) throw new Error(`玩家${i + 1}：${bad}`); });
+          seats.forEach((r, i) => { const bad = unusable(r.strat.value, r.combo.value); if (bad) throw new Error(`玩家${i + 1}：${bad}`); });
           runBtn.disabled = true; progText.textContent = '準備中（計算策略）…';
           await new Promise(r => setTimeout(r, 20));
           cfg = {
             rules: Object.assign({}, S.rules), counts: S.counts, penetration: S.pen / 100,
             shuffleEveryRound: S.shuffleMode === 'round', countSystem: S.countSystem,
-            seats: seats.map(r => ({ bet: Math.max(1, +r.bet.value || 1), betMode: r.mode.value, strategy: getStrat(r.strat.value), stratName: libEntry(r.strat.value).name, fixed: [r.c1.value || null, r.c2.value || null] })),
+            seats: seats.map(r => ({
+              bet: Math.max(1, +r.bet.value || 1), betMode: r.mode.value, fixed: [r.c1.value || null, r.c2.value || null],
+              strategy: resolveFor(r.strat.value, r.combo.value), stratName: effName(r.strat.value, r.combo.value),
+              combo: !!comboEntry(r.combo.value), baseStrategy: getStrat(r.strat.value), baseName: libEntry(r.strat.value).get().name
+            })),
             boostSeq: S.boostSeq.slice(), ramp: BJ.parseRamp(S.ramp), dealerUp: dealerUp.value || null,
             logLimit: Math.max(0, parseInt(logLimit.value, 10) || 0)
           };
+          compare = cmpChk.checked && cfg.seats.some(x => x.combo);
+          seedNum = Math.floor(Math.random() * 2147483647);
+          if (compare) KS.setSeed(seedNum); // 兩個版本用同一串牌
           sim = new BJ.Simulator(cfg);
-        } catch (e) { alert(e.message); runBtn.disabled = false; progText.textContent = ''; return; }
+        } catch (e) { alert(e.message); runBtn.disabled = false; progText.textContent = ''; KS.setSeed(S.seed || null); return; }
         stop = false; stopBtn.disabled = false;
         const t0 = Date.now();
         try {
-          const res = await KS.runChunked(n, () => sim.step(), {
-            shouldStop: () => stop,
-            onProgress: (i, t) => { bar.style.width = (i / t * 100).toFixed(1) + '%'; progText.textContent = `${i.toLocaleString()} / ${t.toLocaleString()} 局`; }
-          });
+          const res = await runOnce(sim, n, compare ? '（1/2 使用算牌）' : '');
           sim.finish();
-          progText.textContent = `${res.stopped ? '已停止，' : '完成，'}共 ${sim.round.toLocaleString()} 局，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`;
-          renderSim(out, sim, cfg);
+          let simB = null, cfgB = null;
+          if (compare && !res.stopped) {
+            // 對照組：同一個種子，使用算牌的玩家改回原本的策略
+            cfgB = Object.assign({}, cfg, { logLimit: 0, seats: cfg.seats.map(x => (x.combo ? Object.assign({}, x, { strategy: x.baseStrategy, stratName: x.baseName, combo: false }) : x)) });
+            KS.setSeed(seedNum);
+            simB = new BJ.Simulator(cfgB);
+            await runOnce(simB, sim.round, '（2/2 對照：不使用算牌）');
+            simB.finish();
+          }
+          progText.textContent = `${res.stopped ? '已停止，' : '完成，'}共 ${sim.round.toLocaleString()} 局${simB ? '（含對照）' : ''}，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`;
+          renderSim(out, sim, cfg, simB, cfgB);
         } catch (e) {
           console.error(e);
           alert('模擬錯誤：' + e.message);
-        } finally { runBtn.disabled = false; stopBtn.disabled = true; }
+        } finally { runBtn.disabled = false; stopBtn.disabled = true; KS.setSeed(S.seed || null); }
       }
       return api;
     }
 
-    function renderSim(out, sim, cfg) {
+    function renderSim(out, sim, cfg, simB, cfgB) {
       out.innerHTML = '';
       const warn = sim.warnings.size ? `<div class="alert">${Array.from(sim.warnings).map(ui.esc).join('<br>')}</div>` : '';
       let t = `<div class="panel">${warn}<h3>玩家統計（${sim.round.toLocaleString()} 局）</h3><div class="table-wrap"><table><tr>
@@ -460,6 +594,19 @@
           <td>${s.acc.sd().toFixed(3)}</td><td>${ui.pct(s.net, s.wagered, 3)}</td><td>${ui.fmt(s.bank.maxDD)}</td></tr>`;
       });
       t += '</table></div><small class="muted">每局EV = 每局淨盈虧 ÷ 基本注。信賴區間跨過 0 表示局數還不足以判斷正負。</small></div>';
+      if (simB) {
+        t += `<div class="panel"><h3>🧮 算牌組合對照（同一串牌・${sim.round.toLocaleString()} 局）</h3><div class="table-wrap"><table><tr><th>玩家</th><th>版本</th><th>策略</th><th>勝率(不含和)</th><th>每局EV(原注)</th><th>95%信賴區間</th><th>淨盈虧</th></tr>`;
+        cfg.seats.forEach((x, i) => {
+          if (!x.combo) return;
+          const a = sim.stats[i], b = simB.stats[i];
+          const row = (lab, st, nm) => { const ci = st.acc.ci95(); return `<tr><td>玩家${i + 1}</td><td>${lab}</td><td>${ui.esc(nm)}</td><td>${ui.pct(st.rW, st.rW + st.rL)}</td><td class="${clsNum(st.acc.mean())}">${evPct(st.acc.mean())}</td><td>${evPct(ci[0])} ~ ${evPct(ci[1])}</td><td class="${clsNum(st.net)}">${ui.signed(st.net, 0)}</td></tr>`; };
+          const dEV = a.acc.mean() - b.acc.mean(), dNet = a.net - b.net;
+          const wa = a.rW / Math.max(1, a.rW + a.rL), wb = b.rW / Math.max(1, b.rW + b.rL);
+          t += row('使用算牌', a, x.stratName) + row('不使用算牌', b, x.baseName) +
+            `<tr class="diff-row"><td>玩家${i + 1}</td><td><b>差距</b></td><td>算牌 − 不算牌</td><td>${(wa - wb >= 0 ? '+' : '') + ((wa - wb) * 100).toFixed(2)}%</td><td class="${clsNum(dEV)}">${dEV >= 0 ? '+' : ''}${evPct(dEV)}</td><td></td><td class="${clsNum(dNet)}">${ui.signed(dNet, 0)}</td></tr>`;
+        });
+        t += `</table></div><small class="muted">${cfg.shuffleEveryRound ? '每局洗牌：兩個版本每一局的起始牌序完全相同，差距只來自策略不同。' : '沒有每局洗牌：兩個版本起始牌序相同，但要牌張數不同後，後面的牌序會開始不同。'}差距是否可靠請看信賴區間：局數越多越準。</small></div>`;
+      }
       out.insertAdjacentHTML('beforeend', t);
 
       sim.stats.forEach((s, i) => {
@@ -473,6 +620,7 @@
           <h4>依下注前牌況值（平衡系統為 True Count、KO 為 RC）（${KS.COUNT_SYSTEMS[cfg.countSystem].name}）</h4>
           <div class="table-wrap"><table><tr><th>牌況值</th><th>局數</th><th>比例</th><th>勝率(不含和)</th><th>平均每局EV</th></tr>${tcRows}</table></div>
           ${Object.keys(s.seg).length ? `<h4>依資料庫牌況分段</h4><div class="table-wrap"><table><tr><th>牌況</th><th>局數</th><th>比例</th><th>勝率(不含和)</th><th>平均每局EV</th></tr>${Object.keys(s.seg).map(k => { const b = s.seg[k]; return `<tr><td>${ui.esc(k)}</td><td>${b.n}</td><td>${ui.pct(b.n, s.rounds, 1)}</td><td>${ui.pct(b.w, b.w + b.l)}</td><td class="${clsNum(b.units)}">${evPct(b.units / b.n)}</td></tr>`; }).join('')}</table></div>` : ''}
+          ${Object.keys(s.segUse).length ? `<h4>算牌條件觸發次數（依決策次數）</h4><div class="table-wrap"><table><tr><th>條件</th><th>決策次數</th><th>比例</th></tr>${(() => { const tot = Object.values(s.segUse).reduce((p, q) => p + q, 0); return Object.keys(s.segUse).map(k => `<tr><td>${ui.esc(k)}</td><td>${s.segUse[k].toLocaleString()}</td><td>${ui.pct(s.segUse[k], tot, 1)}</td></tr>`).join(''); })()}</table></div>` : ''}
           <small class="muted">資金最高 ${ui.fmt(s.bank.peak)}、最低 ${ui.fmt(s.bank.low)}、最大單注 ${ui.fmt(s.maxBet)}</small></details></div>`);
       });
 
@@ -515,6 +663,8 @@
       const seatsN = sel([1, 2, 3, 4, 5, 6, 7, 8].map(n => [String(n), n + ' 位']), '1'); // 最多 8 位
       const bet = h('input', { type: 'number', min: 1, value: 500 });
       const advStrat = stratSelect(defStrat(), () => render());
+      const advCombo = comboSelect(store.get(K('advCombo'), ''), v => { store.set(K('advCombo'), v); render(); });
+      const playCtx = () => Object.assign({ tc: counter.index(shoe.size()), rc: counter.rc }, BJ.roundCounts(shoe));
       const chk = (label, on) => { const c = h('input', { type: 'checkbox', checked: on, onchange: () => render() }); return [c, h('label', null, c, label)]; };
       const [cCount, lCount] = chk('顯示 RC/TC', true);
       const [cEV, lEV] = chk('顯示各動作 EV 與勝率', true);
@@ -528,7 +678,7 @@
       const statsBox = h('div');
 
       pane.appendChild(h('div', { class: 'panel' },
-        h('div', { class: 'row' }, '座位數', seatsN, '每手下注', bet, '策略建議依據', advStrat),
+        h('div', { class: 'row' }, '座位數', seatsN, '每手下注', bet, '策略建議依據', advStrat, '算牌方式', advCombo),
         h('div', { class: 'row' }, lCount, lEV, lAdv, lWarn,
           h('button', { class: 'btn-small', text: '重新洗牌', onclick: () => { if (rd && rd.phase === 'player') return; newShoe(); render(); } }),
           h('button', { class: 'btn-small', text: '重設統計', onclick: resetSess }),
@@ -564,8 +714,8 @@
         const c = rd.current();
         const L = rd.legal(c.hand, c.seat);
         if (!L[a]) return;
-        const noAdv = unusable(advStrat.value);
-        const adv = noAdv ? a : BJ.decide(getStrat(advStrat.value), c.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
+        const noAdv = unusable(advStrat.value, advCombo.value);
+        const adv = noAdv ? a : BJ.decide(resolveFor(advStrat.value, advCombo.value), c.hand, rd.dealer[0], L, playCtx());
         sess.decisions++;
         if (noAdv) lastMsg = '';
         else if (adv !== a) {
@@ -662,23 +812,31 @@
             <div class="stat"><b>${ui.pct(shoe.bigSmall().big, shoe.size(), 1)}</b><span>下一張是大牌的機率</span></div>
             <div class="stat"><b>${(shoe.dealt / shoe.total * 100).toFixed(0)}%</b><span>${S.shuffleMode === 'round' ? '本局已發出（每局洗牌）' : '已發出（切牌卡 ' + S.pen + '%）'}</span></div></div>` +
             (S.shuffleMode === 'round' ? '<small class="muted">每局洗牌：每局開始時牌全部放回，RC/TC 歸零，只反映本局發出的牌。</small>' : '');
-          const as = getStrat(advStrat.value);
+          const rc2 = BJ.roundCounts(shoe);
+          inf += `<div class="stat-grid" style="margin-top:6px"><div class="stat"><b>${rc2.big}</b><span>本局已出現大牌（10/J/Q/K/A）</span></div><div class="stat"><b>${rc2.small}</b><span>本局已出現小牌（2–6）</span></div></div>`;
+          const as = resolveFor(advStrat.value, advCombo.value);
           if (as && as.segmented) {
-            const idx = counter.index(shoe.size());
-            const seg = BJ.pickSegment(as, { tc: idx }).seg;
-            inf += `<div class="hint">🎯 目前牌況：<b>${seg ? ui.esc(seg.name) : '基本'}</b>（牌況值 ${Math.floor(idx + 1e-9)}）— 策略建議與「偏離提醒」依此段策略</div>`;
+            const ctx = playCtx();
+            const seg = BJ.pickSegment(as, ctx).seg;
+            if (as.combo) {
+              const v = ctx[as.method];
+              inf += `<div class="hint">🎯 算牌組合「${ui.esc(as.name)}」目前套用：<b>${seg ? ui.esc(seg.name) : '其餘'}</b>（${METHOD_SHORT[as.method]} ${as.method === 'tc' ? Math.floor(v + 1e-9) : v}）→ ${ui.esc(seg && seg.strat ? seg.strat.name : libEntry(advStrat.value).get().name)}</div>`;
+            } else {
+              const idx = ctx.tc;
+              inf += `<div class="hint">🎯 目前牌況：<b>${seg ? ui.esc(seg.name) : '基本'}</b>（牌況值 ${Math.floor(idx + 1e-9)}）— 策略建議與「偏離提醒」依此段策略</div>`;
+            }
           }
         }
         inf += '</div>';
         if (cur && (cEV.checked || cAdv.checked)) {
-          const strat = getStrat(advStrat.value);
-          const noAdv = unusable(advStrat.value);
-          const adv = noAdv ? null : BJ.decide(strat, cur.hand, rd.dealer[0], L, { tc: counter.index(shoe.size()) });
+          const strat = resolveFor(advStrat.value, advCombo.value);
+          const noAdv = unusable(advStrat.value, advCombo.value);
+          const adv = noAdv ? null : BJ.decide(strat, cur.hand, rd.dealer[0], L, playCtx());
           inf += '<div class="panel"><h3>目前手牌分析</h3>';
           if (cAdv.checked && noAdv) inf += `<div class="hint">📋 ${ui.esc(noAdv)}</div>`;
           else if (cAdv.checked) {
-            const sg = BJ.pickSegment(strat, { tc: counter.index(shoe.size()) }).seg;
-            inf += `<div class="hint">📋 ${ui.esc(libEntry(advStrat.value).name)}${sg ? '［' + ui.esc(sg.name) + '］' : ''} 建議：<b>${BJ.ACTION_LABEL[adv]}</b></div>`;
+            const sg = BJ.pickSegment(strat, playCtx()).seg;
+            inf += `<div class="hint">📋 ${ui.esc(effName(advStrat.value, advCombo.value))}${sg ? '［' + ui.esc(sg.name) + '］' : ''} 建議：<b>${BJ.ACTION_LABEL[adv]}</b></div>`;
           }
           if (cEV.checked) {
             const ev = BJ.evaluate(cur.hand.cards, rd.dealer[0], shoe.remaining10(), S.rules, L, { fromAA: cur.hand.fromAA, freeSplitHand: cur.hand.freeSplit });
@@ -877,6 +1035,7 @@
     /* ================================================================ */
     function buildQuizPane(pane) {
       const strat = stratSelect(defStrat(), () => renderQuizSeg());
+      const quizCombo = comboSelect('', () => renderQuizSeg());
       const tHard = h('input', { type: 'checkbox', checked: true });
       const tSoft = h('input', { type: 'checkbox', checked: true });
       const tPair = h('input', { type: 'checkbox', checked: true });
@@ -886,12 +1045,12 @@
       const quizSeg = h('select');
       const quizSegWrap = h('span', null, '牌況', quizSeg);
       function renderQuizSeg() {
-        const s = getStrat(strat.value);
+        const s = resolveFor(strat.value, quizCombo.value);
         quizSeg.innerHTML = '';
         quizSegWrap.style.display = s && s.segmented ? '' : 'none';
         if (!s || !s.segmented) return;
-        quizSeg.appendChild(h('option', { value: '', text: '基本' }));
-        s.segments.forEach(x => quizSeg.appendChild(h('option', { value: x.name, text: `${x.name}（${KS.auth.segText(x)}）` })));
+        quizSeg.appendChild(h('option', { value: '', text: s.combo ? '其餘（左邊的策略）' : '基本' }));
+        s.segments.forEach(x => quizSeg.appendChild(h('option', { value: x.name, text: s.combo ? `${x.name}（${METHOD_SHORT[s.method]} ${rangeText(x.lo, x.hi, s.method)}）` : `${x.name}（${KS.auth.segText(x)}）` })));
       }
       renderQuizSeg();
       const stage = h('div', { class: 'felt', style: { minHeight: '180px' } });
@@ -904,7 +1063,7 @@
       pane.appendChild(h('div', { class: 'panel' },
         h('div', { class: 'row' }, '題型', h('label', null, tHard, '硬牌'), h('label', null, tSoft, '軟牌'), h('label', null, tPair, '對子'),
           '指定點數', total, '指定莊家明牌', upSel),
-        h('div', { class: 'row' }, '策略', strat, quizSegWrap, judge,
+        h('div', { class: 'row' }, '策略', strat, '算牌方式', quizCombo, quizSegWrap, judge,
           h('button', { class: 'btn-good', text: '下一題 (N)', onclick: next }),
           h('button', { class: 'btn-small', text: '重設成績', onclick: resetQuiz }),
           ...scoreButtons('測驗', quizRecord, resetQuiz))));
@@ -915,7 +1074,7 @@
         const seg = quizSeg.value ? `牌況 ${quizSeg.value}` : '';
         return {
           total: sc.n, correct: sc.ok, rate: sc.n ? (sc.ok / sc.n * 100).toFixed(1) + '%' : '-',
-          detail: [parts.join('、'), '策略：' + (libEntry(strat.value) || { name: '—' }).name, seg, '標準：' + (judge.value === 'ev' ? 'EV 最高' : '選定策略')].filter(Boolean).join('｜')
+          detail: [parts.join('、'), '策略：' + effName(strat.value, quizCombo.value), seg, '標準：' + (judge.value === 'ev' ? 'EV 最高' : '選定策略')].filter(Boolean).join('｜')
         };
       }
       pane.appendChild(h('div', { class: 'grid2' }, h('div', { class: 'panel' }, stage, btns, fb), scoreBox));
@@ -974,10 +1133,10 @@
       }
       function answer(a) {
         if (!q || q.answered) return;
-        const bad = unusable(strat.value);
+        const bad = unusable(strat.value, quizCombo.value);
         if (bad && judge.value === 'strat') { fb.innerHTML = `<div class="alert">${ui.esc(bad)}。也可以把標準改成「以 EV 最高為標準答案」。</div>`; return; }
         q.answered = true;
-        const st = getStrat(strat.value);
+        const st = resolveFor(strat.value, quizCombo.value);
         const sAns = bad ? null : BJ.decide(st, { cards: q.cards }, q.up, q.L, { segment: quizSeg.value || '__base__' });
         const c10 = BJ.toCounts10(S.counts);
         [q.up, ...q.cards].forEach(c => { const i = KS.idx10(c); if (c10[i] > 0) c10[i]--; });
@@ -1121,6 +1280,123 @@
           h('button', { class: 'btn-small', text: '⬇ 匯出 JSON', onclick: () => { const v = viewed(); if (!v) return; ui.download(`ks_rules_${v.name.replace(/[\\/:*?"<>|（）()［］ ]+/g, '_')}.json`, JSON.stringify(BJ.exportStrategy(v, { boostSequence: S.boostSeq }), null, 2)); } })),
         dirtyBar, drop, fileInp, msg,
         h('small', { class: 'muted', text: '修改策略後要按「💾 儲存」才會寫入' + (ONLINE ? '資料庫' : '這台電腦') + '；還沒儲存就離開時會提醒你。「資料庫策略」是唯讀的，請直接改資料庫後按上方「重新讀取資料庫」。' })));
+      /* ---------- 🧮 算牌組合編輯器 ---------- */
+      function buildComboEditor() {
+        const box = h('div', { class: 'panel combo-panel' });
+        let curId = S.combos[0] ? S.combos[0].id : '';
+        let lastSel = curId;
+        const pickC = h('select', { onchange: async () => {
+          const v = pickC.value;
+          const was = comboEntry(lastSel);
+          if (was && was.dirty) {
+            pickC.value = lastSel;
+            if (!(await resolveDirty('切換到其他算牌組合'))) return;
+          }
+          curId = v; lastSel = v; fillSel(); render();
+        } });
+        function fillSel() {
+          pickC.innerHTML = '';
+          if (!S.combos.length) pickC.appendChild(h('option', { value: '', text: '（尚無算牌組合）' }));
+          S.combos.forEach(ce => pickC.appendChild(h('option', { value: ce.id, text: ce.c.name + (ce.dirty ? '（● 未儲存）' : '') })));
+          if (!comboEntry(curId)) curId = S.combos[0] ? S.combos[0].id : '';
+          pickC.value = curId; lastSel = curId;
+        }
+        const body = h('div');
+        const addBtn = h('button', { class: 'btn-good', text: '＋ 新增算牌組合', onclick: async () => {
+          if (!(await resolveDirty('建立新的算牌組合'))) return;
+          const n = prompt('算牌組合名稱', '大牌多時換策略');
+          if (!n) return;
+          const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+          S.combos.push({ id, combo: true, c: { kind: 'combo', name: n.trim() || '未命名組合', method: 'big', rules: [{ name: '大牌多', lo: 5, hi: '', use: '' }] }, base: null, dirty: true });
+          curId = id; changed();
+        } });
+        const delBtn = h('button', { class: 'btn-small', text: '刪除', onclick: async () => {
+          const ce = comboEntry(curId);
+          if (!ce) return;
+          if (!confirm(`刪除算牌組合「${ce.c.name}」？${ONLINE && ce.base ? '（會從資料庫刪除）' : ''}`)) return;
+          await removeCombo(ce);
+          curId = ''; changed();
+        } });
+        box.appendChild(h('h3', { text: '🧮 算牌組合（策略 ＋ 算牌）', style: { marginTop: 0 } }));
+        box.appendChild(h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '在任何一套策略上外加算牌：牌況符合條件時改用另一整套策略，都不符合時用原本選的策略。在「模擬」「逐牌遊戲」「測驗」的策略旁邊選「算牌方式」即可使用，預設不使用。' }));
+        box.appendChild(h('div', { class: 'row' }, '組合', pickC, addBtn, delBtn));
+        box.appendChild(body);
+        function changed() { fillSel(); refreshComboSelects(); render(); }
+
+        function render() {
+          body.innerHTML = '';
+          const ce = comboEntry(curId);
+          if (!ce) { body.appendChild(h('p', { class: 'muted', text: '還沒有算牌組合。按「＋ 新增算牌組合」建立，例如「本局大牌出現 5 張以上 → 改用保守策略」。' })); return; }
+          const c = ce.c;
+          c.rules = c.rules || [];
+          const info = h('div');
+          const touch = () => { ce.dirty = true; fillSel(); refreshComboSelects(); renderInfo(); };
+          const name = h('input', { type: 'text', value: c.name, maxlength: 40, oninput: () => { c.name = name.value.trim() || '未命名組合'; touch(); } });
+          const method = sel(Object.keys(BJ.COMBO_METHODS).map(k => [k, BJ.COMBO_METHODS[k]]), c.method || 'tc', v => { c.method = v; touch(); renderRules(); });
+          const tbl = h('table', { class: 'combo-rules' });
+          function renderRules() {
+            tbl.innerHTML = '';
+            const unit = c.method === 'big' || c.method === 'small' ? '（張）' : '';
+            tbl.appendChild(h('tr', null, h('th', { text: '順序' }), h('th', { text: '條件名稱' }), h('th', { text: '下限 ≥' + unit }), h('th', { text: '上限 ≤' + unit }), h('th', { text: '符合時改用的策略' }), h('th', { text: '' })));
+            c.rules.forEach((r, i) => {
+              const nm = h('input', { type: 'text', value: r.name || '', maxlength: 20, oninput: () => { r.name = nm.value; touch(); } });
+              const lo = h('input', { type: 'number', step: 1, placeholder: '不限', value: r.lo === '' || r.lo == null ? '' : r.lo, oninput: () => { r.lo = lo.value === '' ? '' : +lo.value; touch(); } });
+              const hi = h('input', { type: 'number', step: 1, placeholder: '不限', value: r.hi === '' || r.hi == null ? '' : r.hi, oninput: () => { r.hi = hi.value === '' ? '' : +hi.value; touch(); } });
+              const use = h('select', { onchange: () => { r.use = use.value; touch(); } });
+              use.appendChild(h('option', { value: '', text: '（請選擇策略）' }));
+              library().forEach(e => use.appendChild(h('option', { value: e.id, text: e.name })));
+              if (r.use && !strictEntry(r.use)) use.appendChild(h('option', { value: r.use, text: '（已刪除或沒有權限）' }));
+              use.value = r.use || '';
+              const up = h('button', { class: 'btn-small', text: '↑', title: '往上移（上面的條件優先）', disabled: i === 0, onclick: () => { [c.rules[i - 1], c.rules[i]] = [c.rules[i], c.rules[i - 1]]; touch(); renderRules(); } });
+              const del = h('button', { class: 'btn-small', text: '✕', title: '刪除這個條件', onclick: () => { c.rules.splice(i, 1); touch(); renderRules(); } });
+              tbl.appendChild(h('tr', null, h('td', { text: String(i + 1) }), h('td', null, nm), h('td', null, lo), h('td', null, hi), h('td', null, use), h('td', null, up, del)));
+            });
+          }
+          const addRule = h('button', { class: 'btn-small', text: '＋ 新增條件', onclick: () => { c.rules.push({ name: '條件' + (c.rules.length + 1), lo: '', hi: '', use: '' }); touch(); renderRules(); } });
+          function renderInfo() {
+            const m = c.method || 'tc';
+            const lines = c.rules.map((r, i) => `${i + 1}. ${ui.esc(r.name || '條件' + (i + 1))}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)} → <b>${ui.esc(stratName(r.use))}</b>`);
+            lines.push(`其餘 → <b>使用左邊選的策略</b>`);
+            const warns = [];
+            c.rules.forEach((r, i) => {
+              const a = [numOr(r.lo, -Infinity), numOr(r.hi, Infinity)];
+              if (a[0] > a[1]) warns.push(`「${r.name || '條件' + (i + 1)}」的下限大於上限，永遠不會成立`);
+              if (!r.use) warns.push(`「${r.name || '條件' + (i + 1)}」還沒選要改用的策略`);
+              else if (!strictEntry(r.use)) warns.push(`「${r.name || '條件' + (i + 1)}」使用的策略已刪除或沒有權限`);
+              for (let j = 0; j < i; j++) {
+                const b = [numOr(c.rules[j].lo, -Infinity), numOr(c.rules[j].hi, Infinity)];
+                if (Math.max(a[0], b[0]) <= Math.min(a[1], b[1])) warns.push(`「${r.name || '條件' + (i + 1)}」和上面的「${c.rules[j].name || '條件' + (j + 1)}」範圍重疊，重疊的部分以上面的為準`);
+              }
+            });
+            info.innerHTML = `<div class="hint"><b>套用順序（由上往下，第一個符合的生效）</b><br>${lines.join('<br>')}</div>` +
+              (m === 'big' || m === 'small' ? '<small class="muted">「本局已出現」包含桌上所有玩家的牌和莊家明牌，不含莊家還沒翻的第二張；每一局重新計算。大牌＝10/J/Q/K/A，小牌＝2～6。</small>' : '<small class="muted">True Count／Running Count 依「規則與牌組」選的算牌系統計算；每局洗牌時每局開始都會歸零。</small>') +
+              (warns.length ? `<div class="alert">⚠️ ${warns.map(ui.esc).join('<br>⚠️ ')}</div>` : '');
+            const bar = h('div', { class: 'row' });
+            if (ce.dirty) {
+              bar.appendChild(h('span', { class: 'unsaved', text: ce.base ? '● 有未儲存的修改' : '● 新的算牌組合，還沒有儲存' }));
+              bar.appendChild(h('button', { class: 'btn-good', text: '💾 儲存', onclick: async () => {
+                if ((await askChanges(ce, { title: '確認儲存', saveText: '💾 確認儲存', cancelText: '取消' })) !== 'save') return;
+                try { await commit(ce); flash('已儲存算牌組合：' + ce.c.name); } catch (e) { flash('儲存失敗：' + e.message, true); }
+              } }));
+              bar.appendChild(h('button', { class: 'btn-small', text: '↩ 放棄修改', onclick: async () => {
+                const r = await askChanges(ce, { title: '放棄修改？', message: '以下修改會被丟掉' + (ce.base ? '，回到上次儲存的內容。' : '，這個新組合會被移除。'), saveText: '💾 改成儲存', allowDiscard: true, discardText: '確定放棄', cancelText: '取消' });
+                if (r === 'save') { try { await commit(ce); } catch (e) { flash('儲存失敗：' + e.message, true); } }
+                else if (r === 'discard') { discard(ce); flash('已放棄修改'); }
+              } }));
+            } else bar.appendChild(h('span', { class: 'muted', text: ONLINE ? '✔ 已儲存到資料庫' : '✔ 已儲存在這台電腦' }));
+            info.appendChild(bar);
+          }
+          body.appendChild(h('div', { class: 'row' }, '名稱', name, '計算方式', method));
+          body.appendChild(h('div', { class: 'table-wrap' }, tbl));
+          body.appendChild(h('div', { class: 'row' }, addRule));
+          body.appendChild(info);
+          renderRules(); renderInfo();
+        }
+        fillSel(); render();
+        return { el: box, refresh: () => { fillSel(); render(); } };
+      }
+      comboEd = buildComboEditor();
+      pane.appendChild(comboEd.el);
       pane.appendChild(gridBox);
 
       const LABEL = { H: 'H', S: 'S', Dh: 'D', Ds: 'Ds', Rh: 'R', Rs: 'Rs', P: 'P', D: 'D', R: 'R', '-': '·', Y: '收', N: '不收' };

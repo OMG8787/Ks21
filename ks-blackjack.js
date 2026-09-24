@@ -537,16 +537,38 @@
       if (s) return { strat: s.strat, seg: s };
       return { strat: strat.base, seg: null };
     }
-    if (ctx && ctx.tc != null && isFinite(ctx.tc)) {
-      const v = Math.floor(ctx.tc + 1e-9);
+    const val = ctx ? ctx[strat.method || 'tc'] : null;
+    if (val != null && isFinite(val)) {
+      const v = Math.floor(val + 1e-9);
       const s = strat.segments.find(x => v >= x.lo && v <= x.hi);
       if (s) return { strat: s.strat, seg: s };
     }
     return { strat: strat.base, seg: null };
   }
 
+  /* ---------------- 算牌組合：基本策略 ＋ 依牌況改用另一整套策略 ----------------
+     combo = { kind:'combo', name, method:'tc'|'rc'|'big'|'small', rules:[{ name, lo, hi, use }] }
+     轉成分段策略；由上往下第一個符合的條件生效，都不符合用 base */
+  const COMBO_METHODS = { tc: 'True Count', rc: 'Running Count', big: '本局已出現大牌張數', small: '本局已出現小牌張數' };
+  const numOr = (x, def) => (x === null || x === undefined || x === '' || !isFinite(+x) ? def : +x);
+  function resolveCombo(base, combo, getStrat) {
+    const errors = [];
+    const segments = (combo.rules || []).map((r, i) => {
+      const st = r.use ? getStrat(r.use) : null;
+      if (!st) errors.push({ rule: i, name: r.name || '條件' + (i + 1), reason: r.use ? 'missing' : 'empty' });
+      return { name: r.name || '條件' + (i + 1), lo: numOr(r.lo, -Infinity), hi: numOr(r.hi, Infinity), strat: st, use: r.use };
+    });
+    return { segmented: true, combo: true, name: combo.name, method: combo.method || 'tc', base, segments, errors };
+  }
+  // 本局目前已出現的牌（莊家第二張要等玩家都結束才發，所以不會被算到）
+  function roundCounts(shoe) {
+    let big = 0, small = 0;
+    (shoe.roundCards || []).forEach(c => { const v = bjValue(c); if (v >= 10) big++; else if (v <= 6) small++; });
+    return { big, small };
+  }
+
   function decide(strat, hand, dealerUp, L, ctx) {
-    strat = pickSegment(strat, ctx).strat;
+    for (let i = 0; i < 4 && strat && strat.segmented; i++) strat = pickSegment(strat, ctx).strat;
     const d = dealerUpValue(dealerUp);
     if (L.even) {
       if (strat.evenMoneyMap && strat.evenMoneyMap[d] != null) return strat.evenMoneyMap[d] ? 'even' : 'wait';
@@ -880,11 +902,16 @@
         rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
         dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, split: 0, splitHands: 0, splitW: 0, even: 0,
         wagered: 0, net: 0, acc: new KS.Acc(), bank: new KS.Bankroll(), streak: new KS.StreakTracker(10),
-        road: [], tc: {}, seg: {}, maxBet: 0
+        road: [], tc: {}, seg: {}, segUse: {}, maxBet: 0
       }));
       this.dealerStats = { total: 0, played: 0 };
       OUTCOMES.forEach(k => { this.dealerStats[k] = 0; });
       this.warnings = new Set();
+    }
+    // 決策當下的牌況值
+    ctx() {
+      const rc = roundCounts(this.shoe);
+      return { tc: this.counter.index(this.shoe.size()), rc: this.counter.rc, big: rc.big, small: rc.small };
     }
     _betFor(i, tc) {
       const s = this.cfg.seats[i], st = this.seatState[i];
@@ -909,7 +936,15 @@
       while (rd.phase === 'player') {
         const c = rd.current();
         const L = rd.legal(c.hand, c.seat);
-        const a = decide(cfg.seats[c.seatIdx].strategy, c.hand, rd.dealer[0], L, { tc: this.counter.index(this.shoe.size()) });
+        const st = cfg.seats[c.seatIdx].strategy;
+        const ctx = this.ctx();
+        if (st.segmented) {
+          const sg = pickSegment(st, ctx).seg;
+          const nm = sg ? sg.name : (st.combo ? '其餘（基本策略）' : '基本');
+          const U = this.stats[c.seatIdx].segUse;
+          U[nm] = (U[nm] || 0) + 1;
+        }
+        const a = decide(st, c.hand, rd.dealer[0], L, ctx);
         c.hand.decisionTC = tc;
         rd.act(L[a] ? a : 'stand');
         if (++guard > 500) throw new Error('決策迴圈異常');
@@ -952,7 +987,8 @@
         tb.n++; tb.units += seat.net / cfg.seats[i].bet;
         if (seat.result === 'W') tb.w++; else if (seat.result === 'L') tb.l++;
         // 依牌況分段統計（資料庫分段策略）
-        const segName = cfg.seats[i].strategy.segmented ? (pickSegment(cfg.seats[i].strategy, { tc }).seg || { name: '基本' }).name : null;
+        const sst = cfg.seats[i].strategy;
+        const segName = sst.segmented && (sst.method || 'tc') === 'tc' && !sst.combo ? (pickSegment(sst, { tc }).seg || { name: '基本' }).name : null;
         if (segName) {
           const sb = S.seg[segName] || (S.seg[segName] = { n: 0, units: 0, w: 0, l: 0 });
           sb.n++; sb.units += seat.net / cfg.seats[i].bet;
@@ -983,7 +1019,7 @@
   KS.BJ = {
     BASE_RULES, PRESETS, RULE_FIELDS, OUTCOMES, DEALER_VALS, ACTION_LABEL,
     handInfo, handTotal, isTwoCard21, is777or678, Round, decide, pickSegment, cells, cloneStrategy, normalizeStrategy, exportStrategy,
-    blankStrategy, missingCells, requiredTotal, REQUIRED,
+    blankStrategy, missingCells, requiredTotal, REQUIRED, resolveCombo, roundCounts, COMBO_METHODS,
     ksDefaultStrategy, dealerDist, standVec, evaluate, toCounts10, generateOptimalStrategy, Simulator, parseRamp
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = KS;

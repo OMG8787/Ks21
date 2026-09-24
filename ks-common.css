@@ -146,3 +146,11 @@ td.best { background: #e5f5ec !important; font-weight: 700; }
 .strat th.row-head { cursor: pointer; }
 .strat th.row-head:hover { background: #e3e8f1; }
 .ok-text { color: var(--good); font-weight: 600; }
+/* 算牌組合 */
+.combo-panel { border-left: 4px solid var(--accent); }
+.combo-rules input[type=text] { width: 120px; }
+.combo-rules input[type=number] { width: 80px; }
+.combo-rules td, .combo-rules th { white-space: nowrap; }
+.combo-rules select { max-width: 280px; }
+.combo-select { max-width: 220px; }
+tr.diff-row td { background: #f5f7fb; font-weight: 600; }
