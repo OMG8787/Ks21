@@ -20,6 +20,10 @@
     .acc-field { display: grid; gap: 4px; }
     .acc-field input { width: 100%; }
     .acc-field label { font-weight: 600; }
+    .login h3 { margin: 0 0 8px; }
+    .login-links { display: flex; justify-content: space-between; margin: 10px 0 6px; }
+    .login-links a { color: var(--accent); text-decoration: none; }
+    .login-links a:hover { text-decoration: underline; }
   </style>
 </head>
 
@@ -44,32 +48,116 @@
 
       const goNext = () => { if (next && GAMES.some(g => g.file === next)) { location.href = next; return true; } return false; };
 
-      function renderLogin(err) {
+      // 登入畫面共用外框
+      function loginShell(title, ...kids) {
         app.innerHTML = '';
+        app.appendChild(h('div', { class: 'panel login' }, h('h1', { text: '🃏 KS 牌桌模擬器' }), title ? h('h3', { text: title }) : null, ...kids));
+      }
+      const field = (label, input) => [h('label', { text: label, for: input.id, style: { display: 'block' } }), input];
+      const links = (...items) => h('div', { class: 'login-links' }, ...items.map(([t, fn]) => h('a', { href: '#', text: t, onclick: e => { e.preventDefault(); fn(); } })));
+      const onEnter = (inputs, fn) => inputs.forEach(x => x.addEventListener('keydown', e => { if (e.key === 'Enter') fn(); }));
+      const alertBox = t => `<div class="alert">${ui.esc(t)}</div>`;
+
+      function renderLogin(err, info) {
         const id = h('input', { type: 'text', id: 'login-id', placeholder: 'ID', autocomplete: 'username' });
         const pw = h('input', { type: 'password', id: 'login-pw', placeholder: '密碼', autocomplete: 'current-password' });
         const msg = h('div');
-        if (err) msg.innerHTML = `<div class="alert">${ui.esc(err)}</div>`;
+        if (err) msg.innerHTML = alertBox(err);
+        if (info) msg.innerHTML = `<div class="okbox">${ui.esc(info)}</div>`;
         const go = async () => {
-          if (!id.value.trim()) { msg.innerHTML = '<div class="alert">請輸入 ID</div>'; return; }
+          if (!id.value.trim()) { msg.innerHTML = alertBox('請輸入 ID'); return; }
           btn.disabled = true; btn.textContent = '登入中…'; msg.innerHTML = '';
           try {
             await auth.login(id.value, pw.value);
-            if (!goNext()) renderMenu();
+            if (auth.user.mustChange) renderForceChange(pw.value);
+            else if (!goNext()) renderMenu();
           } catch (e) {
-            msg.innerHTML = `<div class="alert">${ui.esc(e.message)}</div>`;
+            msg.innerHTML = e.pending ? `<div class="hint">⏳ ${ui.esc(e.message)}</div>` : alertBox(e.message);
             btn.disabled = false; btn.textContent = '登入';
           }
         };
         const btn = h('button', { text: '登入', style: { width: '100%' }, onclick: go });
-        [id, pw].forEach(x => x.addEventListener('keydown', e => { if (e.key === 'Enter') go(); }));
-        app.appendChild(h('div', { class: 'panel login' },
-          h('h1', { text: '🃏 KS 牌桌模擬器' }),
-          h('label', { text: 'ID', for: 'login-id', style: { display: 'block' } }), id,
-          h('label', { text: '密碼', for: 'login-pw', style: { display: 'block' } }), pw,
-          btn, msg,
-          h('small', { class: 'muted', text: '帳號由管理者建立。登入後這台裝置會保持登入，直到你登出或管理者移除這台裝置。' })));
+        onEnter([id, pw], go);
+        loginShell(null, ...field('ID', id), ...field('密碼', pw), btn, msg,
+          links(['新增帳號', renderRegister], ['忘記密碼', renderForgot]),
+          h('small', { class: 'muted', text: '登入後這台裝置會保持登入，直到你登出或管理者移除這台裝置。' }));
         setTimeout(() => id.focus(), 0);
+      }
+
+      // 新增帳號：送出後要等管理員開通
+      function renderRegister() {
+        const id = h('input', { type: 'text', id: 'reg-id', placeholder: '英文、數字、中文，最多 30 字', autocomplete: 'username', maxlength: 30 });
+        const name = h('input', { type: 'text', id: 'reg-name', placeholder: '顯示的名稱', maxlength: 30 });
+        const pw1 = h('input', { type: 'password', id: 'reg-pw1', placeholder: `至少 ${auth.MIN_PW} 個字`, autocomplete: 'new-password' });
+        const pw2 = h('input', { type: 'password', id: 'reg-pw2', placeholder: '再輸入一次', autocomplete: 'new-password' });
+        const msg = h('div');
+        const go = async () => {
+          if (!id.value.trim()) { msg.innerHTML = alertBox('請輸入 ID'); return; }
+          if (pw1.value.length < auth.MIN_PW) { msg.innerHTML = alertBox(`密碼至少要 ${auth.MIN_PW} 個字`); return; }
+          if (pw1.value !== pw2.value) { msg.innerHTML = alertBox('兩次輸入的密碼不一樣'); return; }
+          btn.disabled = true; btn.textContent = '送出中…'; msg.innerHTML = '';
+          try {
+            const m = await auth.register(id.value, name.value || id.value, pw1.value);
+            loginShell('申請已送出',
+              h('div', { class: 'hint', html: `⏳ <b>${ui.esc(m)}</b>` }),
+              h('p', { class: 'muted', text: '帳號開通前無法登入使用。' }),
+              h('button', { text: '回到登入', style: { width: '100%' }, onclick: () => renderLogin() }));
+          } catch (e) { msg.innerHTML = alertBox(e.message); btn.disabled = false; btn.textContent = '送出申請'; }
+        };
+        const btn = h('button', { text: '送出申請', style: { width: '100%' }, onclick: go });
+        onEnter([id, name, pw1, pw2], go);
+        loginShell('新增帳號', ...field('ID（登入用）', id), ...field('使用者名稱', name), ...field('密碼', pw1), ...field('確認密碼', pw2), btn, msg,
+          links(['← 回到登入', () => renderLogin()]),
+          h('small', { class: 'muted', text: '送出後需要等待管理員開通帳號，需要幾分鐘至幾天。' }));
+        setTimeout(() => id.focus(), 0);
+      }
+
+      // 忘記密碼：一般玩家重設成 123456，登入後必須改密碼
+      function renderForgot() {
+        const id = h('input', { type: 'text', id: 'fg-id', placeholder: '你的 ID', autocomplete: 'username' });
+        const msg = h('div');
+        const go = async () => {
+          if (!id.value.trim()) { msg.innerHTML = alertBox('請輸入 ID'); return; }
+          btn.disabled = true; btn.textContent = '處理中…'; msg.innerHTML = '';
+          try {
+            const m = await auth.forgot(id.value);
+            renderLogin(null, m);
+            document.getElementById('login-id').value = id.value.trim();
+            document.getElementById('login-pw').focus();
+          } catch (e) { msg.innerHTML = alertBox(e.message); btn.disabled = false; btn.textContent = '重設密碼'; }
+        };
+        const btn = h('button', { text: '重設密碼', style: { width: '100%' }, onclick: go });
+        onEnter([id], go);
+        loginShell('忘記密碼', ...field('ID', id), btn, msg,
+          links(['← 回到登入', () => renderLogin()]),
+          h('small', { class: 'muted', text: '密碼會重設為 123456，登入後需要馬上設定新密碼。管理者帳號請洽其他管理者。' }));
+        setTimeout(() => id.focus(), 0);
+      }
+
+      // 密碼被重設過：先設定新密碼才能使用
+      function renderForceChange(curPw) {
+        const cur = h('input', { type: 'password', id: 'fc-cur', autocomplete: 'current-password', placeholder: '重設後是 123456' });
+        if (curPw) cur.value = curPw;
+        const pw1 = h('input', { type: 'password', id: 'fc-pw1', autocomplete: 'new-password', placeholder: `至少 ${auth.MIN_PW} 個字` });
+        const pw2 = h('input', { type: 'password', id: 'fc-pw2', autocomplete: 'new-password', placeholder: '再輸入一次' });
+        const msg = h('div');
+        const go = async () => {
+          if (pw1.value.length < auth.MIN_PW) { msg.innerHTML = alertBox(`新密碼至少要 ${auth.MIN_PW} 個字`); return; }
+          if (pw1.value !== pw2.value) { msg.innerHTML = alertBox('兩次輸入的新密碼不一樣'); return; }
+          if (pw1.value === '123456') { msg.innerHTML = alertBox('新密碼不能是 123456'); return; }
+          btn.disabled = true; btn.textContent = '儲存中…'; msg.innerHTML = '';
+          try {
+            await auth.updateAccount(cur.value, { newPw: pw1.value });
+            if (!goNext()) renderMenu();
+          } catch (e) { msg.innerHTML = alertBox(e.message); btn.disabled = false; btn.textContent = '設定新密碼'; }
+        };
+        const btn = h('button', { text: '設定新密碼', style: { width: '100%' }, onclick: go });
+        onEnter([cur, pw1, pw2], go);
+        loginShell('請設定新密碼',
+          h('div', { class: 'hint', text: `你的密碼已重設。為了安全，請先設定新密碼（${auth.user.id}）。` }),
+          ...field('目前的密碼', cur), ...field('新密碼', pw1), ...field('確認新密碼', pw2), btn, msg,
+          links(['登出', async () => { await auth.logout(); renderLogin(); }]));
+        setTimeout(() => (curPw ? pw1 : cur).focus(), 0);
       }
 
       function renderMenu() {
@@ -111,7 +199,7 @@
           if (id.value.trim() !== auth.user.id) changes.newId = id.value.trim();
           if (pw1.value || pw2.value) {
             if (pw1.value !== pw2.value) { msg.innerHTML = '<div class="alert">兩次輸入的新密碼不一樣</div>'; return; }
-            if (pw1.value.length < 4) { msg.innerHTML = '<div class="alert">新密碼至少要 4 個字</div>'; return; }
+            if (pw1.value.length < auth.MIN_PW) { msg.innerHTML = '<div class="alert">新密碼至少要 ' + auth.MIN_PW + ' 個字</div>'; return; }
             changes.newPw = pw1.value;
           }
           if (!Object.keys(changes).length) { msg.innerHTML = '<div class="alert">沒有任何修改</div>'; return; }
@@ -136,7 +224,7 @@
           h('div', { class: 'acc-grid' },
             field('使用者名稱', name),
             field('ID', id, '改 ID 後，你的策略、練習成績、登入裝置、玩家設定都會一起改到新 ID'),
-            field('新密碼', pw1, '至少 4 個字'),
+            field('新密碼', pw1, '至少 ' + auth.MIN_PW + ' 個字'),
             field('確認新密碼', pw2),
             field('目前的密碼（必填）', cur, '為了安全，任何修改都要先輸入目前的密碼')),
           h('div', { class: 'row' }, save), msg);
@@ -157,7 +245,8 @@
         app.innerHTML = '<div class="panel login"><p class="muted">正在向資料庫驗證登入…</p></div>';
         try {
           await auth.check();
-          if (!goNext()) renderMenu();
+          if (auth.user.mustChange) renderForceChange();
+          else if (!goNext()) renderMenu();
         } catch (e) {
           if (e.kicked) renderLogin(e.message);
           else renderError(e.message);

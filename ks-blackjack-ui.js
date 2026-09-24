@@ -512,7 +512,7 @@
         return true;
       }
 
-      const seatsN = sel([['1', '1 位'], ['2', '2 位'], ['3', '3 位'], ['4', '4 位']], '1');
+      const seatsN = sel([1, 2, 3, 4, 5, 6, 7, 8].map(n => [String(n), n + ' 位']), '1'); // 最多 8 位
       const bet = h('input', { type: 'number', min: 1, value: 500 });
       const advStrat = stratSelect(defStrat(), () => render());
       const chk = (label, on) => { const c = h('input', { type: 'checkbox', checked: on, onchange: () => render() }); return [c, h('label', null, c, label)]; };

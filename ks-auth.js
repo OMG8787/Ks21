@@ -1,7 +1,7 @@
 /* ==========================================================================
    ks-auth.js — 資料庫登入與玩家策略
    資料庫（由 Apps Script 網頁應用程式提供 API，程式碼見 sheet/Code.gs）：
-     帳號     ：ID | 密碼 | 名稱 | 狀態（啟用/停用）| 權限（填「管理者」才看得到最佳基本策略）
+     帳號     ：ID | 密碼（SHA-512 加密）| 名稱 | 狀態（啟用/停用/待審核）| 權限（管理者）| 必須改密碼
      登入裝置 ：金鑰雜湊 | ID | 裝置 | 登入時間 | 最後使用（刪掉一列 = 踢掉那台裝置）
      我的策略 ：ID | 遊戲 | 策略編號 | 策略名稱 | 策略內容 | 更新時間（網站自動寫入）
      練習成績 ：ID | 遊戲 | 類型 | 時間 | 題數 | 答對 | 正確率 | 明細（網站自動寫入）
@@ -14,7 +14,7 @@
   const KS = root.KS || (typeof require !== 'undefined' ? require('./ks-core.js') : null);
 
   const SHEETS = {
-    accounts: { name: '帳號', head: ['ID', '密碼', '名稱', '狀態', '權限'] },
+    accounts: { name: '帳號', head: ['ID', '密碼', '名稱', '狀態', '權限', '必須改密碼'] },
     devices: { name: '登入裝置', head: ['金鑰雜湊', 'ID', '裝置', '登入時間', '最後使用'] },
     saved: { name: '我的策略', head: ['ID', '遊戲', '策略編號', '策略名稱', '策略內容', '更新時間'] },
     scores: { name: '練習成績', head: ['ID', '遊戲', '類型', '時間', '題數', '答對', '正確率', '明細'] },
@@ -145,10 +145,19 @@
   const COOKIE = 'ks_key';
   const COOKIE_DAYS = 400; // 瀏覽器允許的最長期限；每次進站都會自動延長，等同永久
   const cfg = () => (root.KS_CONFIG || {});
-  const API_VERSION = 4; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
+  const API_VERSION = 5; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
+  const PW_PREFIX = 'ks-v1|'; // 與 Code.gs 相同
+  const MIN_PW = 6;
+  // 密碼在瀏覽器先做 SHA-512，網路上不傳明碼（資料庫端會再加鹽雜湊一次）
+  async function hashPw(pw) {
+    if (!(root.crypto && root.crypto.subtle)) throw new Error('瀏覽器不支援加密，請用 https 網址開啟網站');
+    const buf = await root.crypto.subtle.digest('SHA-512', new TextEncoder().encode(PW_PREFIX + String(pw)));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
   const ADMIN_RE = /^(管理者|管理員|admin|administrator|是|y|yes|true|1)$/i;
   const auth = {
     SHEETS, DEALER_COLS, GAME_NAMES, gameKey, systemKey, parseSegments, segText, parseSeq, buildForGame, applyRow,
+    MIN_PW, hashPw,
     user: null,   // { id, name }
     data: null,   // 目前遊戲的資料庫資料
     enabled() { return !!cfg().apiUrl; },
@@ -184,11 +193,23 @@
       return j;
     },
     async login(id, pw) {
-      const res = await this.post({ action: 'login', id: String(id).trim(), pw: String(pw), device: this.device() });
-      if (!res.ok) throw new Error(res.error || '登入失敗');
+      const res = await this.post({ action: 'login', id: String(id).trim(), pwh: await hashPw(pw), device: this.device() });
+      if (!res.ok) { const e = new Error(res.error || '登入失敗'); e.pending = !!res.pending; throw e; }
       this.setKey(res.key);
-      this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+      this.user = { id: res.id, name: res.name || res.id, role: res.role || '', mustChange: !!res.mustChange };
       return this.user;
+    },
+    // 新增帳號：送出後為「待審核」，要等管理員開通
+    async register(id, name, pw) {
+      const res = await this.post({ action: 'register', id: String(id).trim(), name: String(name || '').trim(), pwh: await hashPw(pw) });
+      if (!res.ok) throw new Error(res.error === '未知的動作' ? '資料庫程式不是最新版，請管理者重新部署' : (res.error || '申請失敗'));
+      return res.message;
+    },
+    // 忘記密碼：一般玩家重設成 123456（登入後必須改密碼）
+    async forgot(id) {
+      const res = await this.post({ action: 'forgot', id: String(id).trim() });
+      if (!res.ok) throw new Error(res.error === '未知的動作' ? '資料庫程式不是最新版，請管理者重新部署' : (res.error || '重設失敗'));
+      return res.message;
     },
     // 只驗證登入（首頁用）；被踢除時清掉 cookie
     async check() {
@@ -202,18 +223,22 @@
         throw e;
       }
       this.setKey(key); // 延長 cookie 期限
-      this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
+      this.user = { id: res.id, name: res.name || res.id, role: res.role || '', mustChange: !!res.mustChange };
       return this.user;
     },
     // 帳號設定：目前密碼必填；newId 改了會連動所有資料
     async updateAccount(pw, changes) {
-      const res = await this.post(Object.assign({ action: 'updateAccount', key: this.getKey(), pw: String(pw) }, changes));
+      const body = { action: 'updateAccount', key: this.getKey(), pwh: await hashPw(pw) };
+      if (changes.newName != null) body.newName = changes.newName;
+      if (changes.newId != null) body.newId = changes.newId;
+      if (changes.newPw) body.newPwh = await hashPw(changes.newPw);
+      const res = await this.post(body);
       if (!res.ok) {
         if (res.kicked) { this.clearKey(); this.toLogin(res.error); }
         if (res.error === '未知的動作') throw new Error('資料庫程式不是最新版，請管理者重新部署後再試');
         throw new Error(res.error || '修改失敗');
       }
-      this.user = Object.assign({}, this.user, { id: res.id, name: res.name || res.id });
+      this.user = Object.assign({}, this.user, { id: res.id, name: res.name || res.id, mustChange: changes.newPw ? false : this.user.mustChange });
       return res;
     },
     roleText() { return this.isAdmin() && this.enabled() ? '・管理者' : ''; },
@@ -245,6 +270,7 @@
           const res = await this.post({ action: 'game', key, game });
           if (!res.ok) {
             if (res.kicked) { this.clearKey(); this.toLogin(res.error || '請重新登入'); return; }
+            if (res.mustChange) { this.toLogin(res.error); return; }
             throw new Error(res.error || '驗證失敗');
           }
           this.setKey(key);
@@ -367,7 +393,7 @@
 
   /* ---------------- 資料庫範本（產生要貼上的內容） ---------------- */
   auth.template = function (BJ) {
-    const accounts = [SHEETS.accounts.head, ['admin', '請改密碼', '管理者', '啟用', '管理者'], ['player01', '1234', '範例玩家', '啟用', ''], ['player02', '5678', '玩家二', '啟用', '']];
+    const accounts = [SHEETS.accounts.head, ['admin', '請改密碼', '管理者', '啟用', '管理者', ''], ['player01', '1234', '範例玩家', '啟用', '', ''], ['player02', '5678', '玩家二', '啟用', '', '']];
     const settings = [SHEETS.settings.head,
       ['*', '美式21', 'Hi-Lo', '小牌多:~-2, 正常:-1~1, 大牌多:2~3, 大牌很多:4~', '300,500,800,1200,1800,2700,4000,6000'],
       ['*', '英式21', 'Hi-Lo', '小牌多:~-2, 正常:-1~1, 大牌多:2~3, 大牌很多:4~', '300,500,800,1200,1800,2700,4000,6000'],
