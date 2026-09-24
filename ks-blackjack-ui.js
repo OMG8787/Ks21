@@ -45,17 +45,22 @@
     function loadSavedFromSheet() {
       const list = [];
       KS.auth.savedStrategies().forEach(x => {
-        if (x.obj && x.obj.kind === 'combo') return; // 算牌組合另外讀
+        if (x.obj && x.obj.kind === 'combo') return; // 算牌方式另外讀
         try { const st = BJ.normalizeStrategy(x.obj); st.name = x.name || st.name; list.push({ id: x.sid, s: st }); } catch (e) { /* 略過壞資料 */ }
       });
       return list;
     }
-    // 算牌組合：{ id, combo:true, c:{ kind:'combo', name, method, rules }, base: 上次儲存的 JSON, dirty }
+    // 算牌方式：{ id, combo:true, c:{ kind:'combo', name, method, rules }, base: 上次儲存的 JSON, dirty }
     function loadCombos() {
       const src = ONLINE
         ? KS.auth.savedStrategies().filter(x => x.obj && x.obj.kind === 'combo').map(x => ({ id: x.sid, c: Object.assign({}, x.obj, { name: x.name || x.obj.name }) }))
         : store.get(K('combos'), []).map(x => ({ id: x.id, c: x }));
-      return src.map(x => { const c = Object.assign({ kind: 'combo', method: 'tc', rules: [] }, x.c); delete c.id; return { id: x.id, combo: true, c, base: JSON.stringify(c), dirty: false }; });
+      return src.map(x => {
+        const c = Object.assign({ kind: 'combo', method: 'tc', rules: [] }, x.c);
+        delete c.id;
+        c.rules = (c.rules || []).map(r => ({ name: r.name, lo: r.lo, hi: r.hi })); // 算牌方式只定義條件
+        return { id: x.id, combo: true, c, base: JSON.stringify(c), dirty: false };
+      });
     }
     if (ONLINE) {
       S.user = loadSavedFromSheet();
@@ -181,6 +186,21 @@
       for (let t = 21; t >= 13; t--) cmp('soft', t, `軟 ${t}（A,${t - 11}）`, C.softCode);
       if (S.rules.surrenderAfterDouble) for (let t = 20; t >= 4; t--) cmp('da', t, '加倍後 ' + t, C.daCode);
       if (S.rules.evenMoney) cmp('even', 0, '玩家 BJ（保險）', (st, k, d) => C.evenCode(st, d), [10, 11]);
+      // 各牌況版本（沒改的格子＝照基本）
+      const names = new Set([...Object.keys(old.variants || {}), ...Object.keys(cur.variants || {})]);
+      names.forEach(n => {
+        const ov = old.variants && old.variants[n], nv = cur.variants && cur.variants[n];
+        const cmpV = (kind, key, label, get, cols) => (cols || BJ.DEALER_VALS).forEach(d => {
+          const fk = kind === 'even' ? 0 : key;
+          const x = ov && C.isFilled(ov, kind, fk, d) ? get(ov, key, d) : '=', y = nv && C.isFilled(nv, kind, fk, d) ? get(nv, key, d) : '=';
+          if (x !== y) out.push(`［${n}］${label} 對莊家 ${DEALER_LABEL(d)}：${x === '=' ? '照基本' : codeText(kind, key, x)} → ${y === '=' ? '照基本' : codeText(kind, key, y)}`);
+        });
+        for (let pv = 11; pv >= 2; pv--) cmpV('pair', pv, '對子 ' + (pv === 11 ? 'A,A' : pv + ',' + pv), C.pairCode);
+        for (let t = 21; t >= 4; t--) cmpV('hard', t, '硬 ' + t, C.hardCode);
+        for (let t = 21; t >= 13; t--) cmpV('soft', t, `軟 ${t}（A,${t - 11}）`, C.softCode);
+        if (S.rules.surrenderAfterDouble) for (let t = 20; t >= 4; t--) cmpV('da', t, '加倍後 ' + t, C.daCode);
+        if (S.rules.evenMoney) cmpV('even', 0, '玩家 BJ（保險）', (st, k, d) => C.evenCode(st, d), [10, 11]);
+      });
       return out;
     }
     // 提醒視窗：列出修改內容；回傳 'save' | 'discard' | 'cancel'
@@ -199,7 +219,7 @@
             h('div', { class: 'ks-modal-head' }, h('strong', { text: opt.title })),
             h('div', { class: 'ks-modal-body' },
               opt.message ? h('p', { text: opt.message, style: { marginTop: 0 } }) : null,
-              h('p', { html: `${u.combo ? '算牌組合' : '策略'}「<b>${ui.esc(u.combo ? u.c.name : u.s.name)}</b>」${u.base ? `共有 <b>${list.length}</b> 處修改：` : ''}` }),
+              h('p', { html: `${u.combo ? '算牌方式' : '策略'}「<b>${ui.esc(u.combo ? u.c.name : u.s.name)}</b>」${u.base ? `共有 <b>${list.length}</b> 處修改：` : ''}` }),
               h('ul', { class: 'change-list' }, shown.map(t => h('li', { text: t }))),
               list.length > shown.length ? h('p', { class: 'muted', text: `…還有 ${list.length - shown.length} 處` }) : null,
               h('p', { class: 'muted', text: ONLINE ? '儲存後會寫入 資料庫的「我的策略」。' : '儲存後會存在這台電腦（本機模式）。' }),
@@ -211,7 +231,7 @@
     // 有未儲存的修改時詢問；回傳 true 表示可以繼續
     async function resolveDirty(reason) {
       for (const u of dirtyList()) {
-        const c = await askChanges(u, { title: (u.combo ? '算牌組合' : '策略') + '還沒有儲存', message: `你要${reason}，但以下修改還沒有儲存。要儲存嗎？`, allowDiscard: true, cancelText: '取消（留在這裡）' });
+        const c = await askChanges(u, { title: (u.combo ? '算牌方式' : '策略') + '還沒有儲存', message: `你要${reason}，但以下修改還沒有儲存。要儲存嗎？`, allowDiscard: true, cancelText: '取消（留在這裡）' });
         if (c === 'cancel') return false;
         if (c === 'discard') { discard(u); continue; }
         try { await commit(u); }
@@ -233,7 +253,7 @@
     const missText = n => (n ? `（還有 ${n} 格未填）` : '');
     function library() {
       const list = [];
-      if (S.sheet) list.push({ id: 'sheet', name: `📄 資料庫策略（${KS.auth.user.name}${S.sheet.segments.length ? '，' + S.sheet.segments.length + ' 段牌況' : ''}）${missText(BJ.missingCells(S.sheet.strategy))}`, builtin: true, get: () => S.sheet.strategy });
+      if (S.sheet) list.push({ id: 'sheet', name: `📄 資料庫策略（${KS.auth.user.name}）${missText(BJ.missingCells(S.sheet.strategy))}`, builtin: true, get: () => S.sheet.strategy });
       if (canSeeOptimal()) list.push({ id: 'opt', name: '最佳基本策略（管理者專用・依目前規則自動計算）', builtin: true, get: optimal });
       S.user.forEach(u => list.push({ id: u.id, name: u.s.name + missText(BJ.missingCells(u.s)) + (u.dirty ? '（● 未儲存）' : ''), builtin: false, get: () => u.s }));
       return list;
@@ -241,7 +261,7 @@
     const libEntry = id => library().find(x => x.id === id) || library()[0] || null;
     const getStrat = id => { const e = libEntry(id); return e ? e.get() : null; };
     const defStrat = () => { const l = library(); return l.length ? l[0].id : ''; };
-    // 算牌組合
+    // 算牌方式
     const METHOD_SHORT = { tc: 'TC', rc: 'RC', big: '本局大牌', small: '本局小牌' };
     const numOr = (x, def) => (x === null || x === undefined || x === '' || !isFinite(+x) ? def : +x);
     function rangeText(lo, hi, method) {
@@ -254,25 +274,29 @@
     const strictEntry = id => (id ? library().find(x => x.id === id) || null : null);
     const strictStrat = id => { const e = strictEntry(id); return e ? e.get() : null; };
     const stratName = id => { const e = strictEntry(id); return e ? e.get().name : (id ? '（已刪除或沒有權限）' : '（未選擇）'); };
-    const comboEntry = id => (id ? S.combos.find(x => x.id === id) || null : null);
-    // 左邊選的策略 ＋ 算牌組合 → 實際使用的策略
+    const comboEntry = id => {
+      if (!id) return null;
+      if (id === 'dbseg') return sheetRes && sheetRes.combo ? { id: 'dbseg', builtin: true, combo: true, c: sheetRes.combo } : null;
+      return S.combos.find(x => x.id === id) || null;
+    };
+    // 左邊選的策略 ＋ 算牌方式 → 實際使用的策略
     function resolveFor(stratId, comboId) {
       const base = getStrat(stratId);
       const ce = comboEntry(comboId);
       if (!base || !ce) return base;
-      return BJ.resolveCombo(base, ce.c, strictStrat);
+      return BJ.resolveCombo(base, ce.c);
     }
     function effName(stratId, comboId) {
       const e = libEntry(stratId), ce = comboEntry(comboId);
       return (e ? e.get().name : '—') + (ce ? ' ＋ 算牌：' + ce.c.name : '');
     }
     function diffCombo(ce) {
-      if (!ce.base) return [`新的算牌組合「${ce.c.name}」，還沒有儲存過`];
+      if (!ce.base) return [`新的算牌方式「${ce.c.name}」，還沒有儲存過`];
       const o = JSON.parse(ce.base), n = ce.c, out = [];
       const mo = o.method || 'tc', mn = n.method || 'tc';
       if (o.name !== n.name) out.push(`名稱：「${o.name}」→「${n.name}」`);
       if (mo !== mn) out.push(`計算方式：${BJ.COMBO_METHODS[mo]} → ${BJ.COMBO_METHODS[mn]}`);
-      const desc = (r, m) => `${r.name || '（未命名）'}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)} → ${stratName(r.use)}`;
+      const desc = (r, m) => `${r.name || '（未命名）'}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)}`;
       const a = o.rules || [], b = n.rules || [];
       for (let i = 0; i < Math.max(a.length, b.length); i++) {
         if (!a[i]) out.push(`新增條件 ${i + 1}：${desc(b[i], mn)}`);
@@ -292,10 +316,11 @@
       const v = value !== undefined ? value : s.value;
       s.innerHTML = '';
       s.appendChild(h('option', { value: '', text: '不使用（預設）' }));
+      if (sheetRes && sheetRes.combo) s.appendChild(h('option', { value: 'dbseg', text: '📄 資料庫牌況分段（依TC）' }));
       S.combos.forEach(ce => s.appendChild(h('option', { value: ce.id, text: `${ce.c.name}（依${METHOD_SHORT[ce.c.method || 'tc']}）${ce.dirty ? '（● 未儲存）' : ''}` })));
-      s.value = S.combos.some(c => c.id === v) ? v : '';
+      s.value = S.combos.some(c => c.id === v) || (v === 'dbseg' && sheetRes && sheetRes.combo) ? v : '';
     }
-    function refreshComboSelects() { comboSelects.forEach(s => fillCombo(s)); }
+    function refreshComboSelects() { comboSelects.forEach(s => fillCombo(s)); if (stratPane && stratPane.refreshVer) stratPane.refreshVer(); }
     // 策略能不能拿來模擬／建議／當標準答案：要存在且全部填完
     function unusable(id, comboId) {
       const e = libEntry(id);
@@ -304,15 +329,7 @@
       if (m) return `策略「${e.get().name}」還有 ${m} 格沒填，填完才能使用`;
       if (comboId) {
         const ce = comboEntry(comboId);
-        if (!ce) return '選擇的算牌組合已不存在，請重新選擇';
-        for (let i = 0; i < (ce.c.rules || []).length; i++) {
-          const r = ce.c.rules[i], nm = r.name || '條件' + (i + 1);
-          if (!r.use) return `算牌組合「${ce.c.name}」的條件「${nm}」還沒選要改用的策略`;
-          const st = strictStrat(r.use);
-          if (!st) return `算牌組合「${ce.c.name}」的條件「${nm}」使用的策略已刪除或沒有權限`;
-          const mm = BJ.missingCells(st);
-          if (mm) return `算牌組合「${ce.c.name}」的條件「${nm}」使用的策略「${st.name}」還有 ${mm} 格沒填`;
-        }
+        if (!ce) return '選擇的算牌方式已不存在，請重新選擇';
       }
       return null;
     }
@@ -595,7 +612,7 @@
       });
       t += '</table></div><small class="muted">每局EV = 每局淨盈虧 ÷ 基本注。信賴區間跨過 0 表示局數還不足以判斷正負。</small></div>';
       if (simB) {
-        t += `<div class="panel"><h3>🧮 算牌組合對照（同一串牌・${sim.round.toLocaleString()} 局）</h3><div class="table-wrap"><table><tr><th>玩家</th><th>版本</th><th>策略</th><th>勝率(不含和)</th><th>每局EV(原注)</th><th>95%信賴區間</th><th>淨盈虧</th></tr>`;
+        t += `<div class="panel"><h3>🧮 算牌方式對照（同一串牌・${sim.round.toLocaleString()} 局）</h3><div class="table-wrap"><table><tr><th>玩家</th><th>版本</th><th>策略</th><th>勝率(不含和)</th><th>每局EV(原注)</th><th>95%信賴區間</th><th>淨盈虧</th></tr>`;
         cfg.seats.forEach((x, i) => {
           if (!x.combo) return;
           const a = sim.stats[i], b = simB.stats[i];
@@ -605,7 +622,10 @@
           t += row('使用算牌', a, x.stratName) + row('不使用算牌', b, x.baseName) +
             `<tr class="diff-row"><td>玩家${i + 1}</td><td><b>差距</b></td><td>算牌 − 不算牌</td><td>${(wa - wb >= 0 ? '+' : '') + ((wa - wb) * 100).toFixed(2)}%</td><td class="${clsNum(dEV)}">${dEV >= 0 ? '+' : ''}${evPct(dEV)}</td><td></td><td class="${clsNum(dNet)}">${ui.signed(dNet, 0)}</td></tr>`;
         });
-        t += `</table></div><small class="muted">${cfg.shuffleEveryRound ? '每局洗牌：兩個版本每一局的起始牌序完全相同，差距只來自策略不同。' : '沒有每局洗牌：兩個版本起始牌序相同，但要牌張數不同後，後面的牌序會開始不同。'}差距是否可靠請看信賴區間：局數越多越準。</small></div>`;
+        const sameCards = cfg.seats.every(x => !x.combo || x.strategy.segments.every(g => !g.hasVariant));
+        const vnotes = cfg.seats.map((x, i) => (x.combo ? [i, x.strategy.segments.filter(g => !g.hasVariant).map(g => g.name)] : null)).filter(v => v && v[1].length)
+          .map(([i, ns]) => `玩家${i + 1} 的策略「${ui.esc(cfg.seats[i].baseName)}」沒有 ${ns.map(n => '「' + ui.esc(n) + '」').join('、')} 版本：這些條件成立時仍照基本打法${ns.length === cfg.seats[i].strategy.segments.length ? (sameCards ? '，所以兩個版本結果會相同' : '；這位玩家的差距只來自同桌其他玩家改變打法後，發到的牌跟著不同') : ''}。`);
+        if (vnotes.length) t += `</table></div><div class="hint">${vnotes.join('<br>')}</div><div><small class="muted">${cfg.shuffleEveryRound ? '每局洗牌：兩個版本每一局的起始牌序完全相同，差距只來自策略不同。' : '沒有每局洗牌：兩個版本起始牌序相同，但要牌張數不同後，後面的牌序會開始不同。'}差距是否可靠請看信賴區間：局數越多越準。</small></div>${vnotes.length ? '</div>' : ''}`;
       }
       out.insertAdjacentHTML('beforeend', t);
 
@@ -820,7 +840,7 @@
             const seg = BJ.pickSegment(as, ctx).seg;
             if (as.combo) {
               const v = ctx[as.method];
-              inf += `<div class="hint">🎯 算牌組合「${ui.esc(as.name)}」目前套用：<b>${seg ? ui.esc(seg.name) : '其餘'}</b>（${METHOD_SHORT[as.method]} ${as.method === 'tc' ? Math.floor(v + 1e-9) : v}）→ ${ui.esc(seg && seg.strat ? seg.strat.name : libEntry(advStrat.value).get().name)}</div>`;
+              inf += `<div class="hint">🎯 算牌方式「${ui.esc(as.name)}」目前套用：<b>${seg ? ui.esc(seg.name) : '其餘'}</b>（${METHOD_SHORT[as.method]} ${as.method === 'tc' ? Math.floor(v + 1e-9) : v}）→ ${seg ? (seg.hasVariant ? ui.esc(seg.strat.name) : ui.esc(libEntry(advStrat.value).get().name) + `（沒有「${ui.esc(seg.name)}」版本，照基本打法）`) : ui.esc(libEntry(advStrat.value).get().name)}</div>`;
             } else {
               const idx = ctx.tc;
               inf += `<div class="hint">🎯 目前牌況：<b>${seg ? ui.esc(seg.name) : '基本'}</b>（牌況值 ${Math.floor(idx + 1e-9)}）— 策略建議與「偏離提醒」依此段策略</div>`;
@@ -1198,6 +1218,22 @@
       const dirtyBar = h('div', { class: 'row' });
       const segSel = h('select', { onchange: () => renderGrid() });
       const segWrap = h('span', null, '牌況', segSel);
+      const verSel = h('select', { class: 'ver-select', onchange: () => renderGrid() });
+      const verWrap = h('span', { title: '替算牌方式的條件設定這套策略要改的格子' }, '版本', verSel);
+      // 可設定的版本：所有算牌方式的條件名稱 ＋ 這套策略已有的版本
+      function fillVer() {
+        const st = viewed(), keep = verSel.value;
+        verSel.innerHTML = '';
+        verSel.appendChild(h('option', { value: '', text: '基本打法' }));
+        if (!st) return;
+        const names = new Set();
+        S.combos.forEach(ce => (ce.c.rules || []).forEach(r => { const n = String(r.name || '').trim(); if (n) names.add(n); }));
+        const db = comboEntry('dbseg');
+        if (db) db.c.rules.forEach(r => names.add(r.name));
+        Object.keys(st.variants || {}).forEach(n => names.add(n));
+        names.forEach(n => { const cnt = BJ.variantCount(st.variants && st.variants[n]); verSel.appendChild(h('option', { value: n, text: `［${n}］版本${cnt ? '（已改 ' + cnt + ' 格）' : '（照基本）'}` })); });
+        verSel.value = Array.from(verSel.options).some(o => o.value === keep) ? keep : '';
+      }
       const gridBox = h('div');
       const msg = h('div');
       const flash = (t, bad) => { msg.innerHTML = `<div class="${bad ? 'alert' : 'okbox'}">${ui.esc(t)}</div>`; setTimeout(() => { msg.innerHTML = ''; }, 3500); };
@@ -1272,7 +1308,7 @@
         } catch (e) { flash('匯入失敗：' + e.message, true); }
       }
       pane.appendChild(h('div', { class: 'panel' },
-        h('div', { class: 'row' }, '策略', pick, segWrap,
+        h('div', { class: 'row' }, '策略', pick, segWrap, verWrap,
           h('button', { class: 'btn-good', text: '＋ 新增空白策略', onclick: () => { const n = prompt('新策略名稱', '我的策略'); if (n) addUser(BJ.blankStrategy(n), n, '空白').then(id => { if (id) flash('已建立「' + n + '」：點格子（或點左邊的列名稱一次設定整列）填完後按「💾 儲存」'); }); } }),
           h('button', { class: 'btn-small', text: '複製成新策略（可編輯）', onclick: () => { if (!viewed()) return flash('目前沒有可以複製的策略', true); const n = prompt('新策略名稱', viewed().name.replace(/（.*）/, '') + ' 副本'); if (n) { const from = viewed().name; addUser(viewed(), n, from).then(id => { if (id) flash('已建立「' + n + '」，編輯後請按「💾 儲存」'); }); } } }),
           h('button', { class: 'btn-small', text: '重新命名', onclick: () => { const e = cur(); if (!e || e.builtin) return flash('內建策略不能改名，請先複製', true); const n = prompt('新名稱', e.name); if (n) { e.get().name = n; markDirty(e.id); renderGrid(); } } }),
@@ -1280,7 +1316,7 @@
           h('button', { class: 'btn-small', text: '⬇ 匯出 JSON', onclick: () => { const v = viewed(); if (!v) return; ui.download(`ks_rules_${v.name.replace(/[\\/:*?"<>|（）()［］ ]+/g, '_')}.json`, JSON.stringify(BJ.exportStrategy(v, { boostSequence: S.boostSeq }), null, 2)); } })),
         dirtyBar, drop, fileInp, msg,
         h('small', { class: 'muted', text: '修改策略後要按「💾 儲存」才會寫入' + (ONLINE ? '資料庫' : '這台電腦') + '；還沒儲存就離開時會提醒你。「資料庫策略」是唯讀的，請直接改資料庫後按上方「重新讀取資料庫」。' })));
-      /* ---------- 🧮 算牌組合編輯器 ---------- */
+      /* ---------- 🧮 算牌方式編輯器 ---------- */
       function buildComboEditor() {
         const box = h('div', { class: 'panel combo-panel' });
         let curId = S.combos[0] ? S.combos[0].id : '';
@@ -1290,35 +1326,35 @@
           const was = comboEntry(lastSel);
           if (was && was.dirty) {
             pickC.value = lastSel;
-            if (!(await resolveDirty('切換到其他算牌組合'))) return;
+            if (!(await resolveDirty('切換到其他算牌方式'))) return;
           }
           curId = v; lastSel = v; fillSel(); render();
         } });
         function fillSel() {
           pickC.innerHTML = '';
-          if (!S.combos.length) pickC.appendChild(h('option', { value: '', text: '（尚無算牌組合）' }));
+          if (!S.combos.length) pickC.appendChild(h('option', { value: '', text: '（尚無算牌方式）' }));
           S.combos.forEach(ce => pickC.appendChild(h('option', { value: ce.id, text: ce.c.name + (ce.dirty ? '（● 未儲存）' : '') })));
           if (!comboEntry(curId)) curId = S.combos[0] ? S.combos[0].id : '';
           pickC.value = curId; lastSel = curId;
         }
         const body = h('div');
-        const addBtn = h('button', { class: 'btn-good', text: '＋ 新增算牌組合', onclick: async () => {
-          if (!(await resolveDirty('建立新的算牌組合'))) return;
-          const n = prompt('算牌組合名稱', '大牌多時換策略');
+        const addBtn = h('button', { class: 'btn-good', text: '＋ 新增算牌方式', onclick: async () => {
+          if (!(await resolveDirty('建立新的算牌方式'))) return;
+          const n = prompt('算牌方式名稱', '大牌多');
           if (!n) return;
           const id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-          S.combos.push({ id, combo: true, c: { kind: 'combo', name: n.trim() || '未命名組合', method: 'big', rules: [{ name: '大牌多', lo: 5, hi: '', use: '' }] }, base: null, dirty: true });
+          S.combos.push({ id, combo: true, c: { kind: 'combo', name: n.trim() || '未命名組合', method: 'big', rules: [{ name: '大牌多', lo: 5, hi: '' }] }, base: null, dirty: true });
           curId = id; changed();
         } });
         const delBtn = h('button', { class: 'btn-small', text: '刪除', onclick: async () => {
           const ce = comboEntry(curId);
           if (!ce) return;
-          if (!confirm(`刪除算牌組合「${ce.c.name}」？${ONLINE && ce.base ? '（會從資料庫刪除）' : ''}`)) return;
+          if (!confirm(`刪除算牌方式「${ce.c.name}」？${ONLINE && ce.base ? '（會從資料庫刪除）' : ''}`)) return;
           await removeCombo(ce);
           curId = ''; changed();
         } });
-        box.appendChild(h('h3', { text: '🧮 算牌組合（策略 ＋ 算牌）', style: { marginTop: 0 } }));
-        box.appendChild(h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '在任何一套策略上外加算牌：牌況符合條件時改用另一整套策略，都不符合時用原本選的策略。在「模擬」「逐牌遊戲」「測驗」的策略旁邊選「算牌方式」即可使用，預設不使用。' }));
+        box.appendChild(h('h3', { text: '🧮 算牌方式', style: { marginTop: 0 } }));
+        box.appendChild(h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '算牌方式只定義「什麼情況算成立」（例如「大牌多：本局大牌 ≥ 5 張」），不綁任何策略。每套策略可以在上方表格的「版本」選單，替每個條件設定要改的格子；使用時條件成立就用那套策略自己的版本，沒設定就照基本打法。在「模擬」「逐牌遊戲」「測驗」的策略旁邊選「算牌方式」即可使用，預設不使用。' }));
         box.appendChild(h('div', { class: 'row' }, '組合', pickC, addBtn, delBtn));
         box.appendChild(body);
         function changed() { fillSel(); refreshComboSelects(); render(); }
@@ -1326,7 +1362,7 @@
         function render() {
           body.innerHTML = '';
           const ce = comboEntry(curId);
-          if (!ce) { body.appendChild(h('p', { class: 'muted', text: '還沒有算牌組合。按「＋ 新增算牌組合」建立，例如「本局大牌出現 5 張以上 → 改用保守策略」。' })); return; }
+          if (!ce) { body.appendChild(h('p', { class: 'muted', text: '還沒有算牌方式。按「＋ 新增算牌方式」建立，例如「本局大牌出現 5 張以上 → 改用保守策略」。' })); return; }
           const c = ce.c;
           c.rules = c.rules || [];
           const info = h('div');
@@ -1337,32 +1373,29 @@
           function renderRules() {
             tbl.innerHTML = '';
             const unit = c.method === 'big' || c.method === 'small' ? '（張）' : '';
-            tbl.appendChild(h('tr', null, h('th', { text: '順序' }), h('th', { text: '條件名稱' }), h('th', { text: '下限 ≥' + unit }), h('th', { text: '上限 ≤' + unit }), h('th', { text: '符合時改用的策略' }), h('th', { text: '' })));
+            tbl.appendChild(h('tr', null, h('th', { text: '順序' }), h('th', { text: '條件名稱' }), h('th', { text: '下限 ≥' + unit }), h('th', { text: '上限 ≤' + unit }), h('th', { text: '已設定這個版本的策略' }), h('th', { text: '' })));
             c.rules.forEach((r, i) => {
               const nm = h('input', { type: 'text', value: r.name || '', maxlength: 20, oninput: () => { r.name = nm.value; touch(); } });
               const lo = h('input', { type: 'number', step: 1, placeholder: '不限', value: r.lo === '' || r.lo == null ? '' : r.lo, oninput: () => { r.lo = lo.value === '' ? '' : +lo.value; touch(); } });
               const hi = h('input', { type: 'number', step: 1, placeholder: '不限', value: r.hi === '' || r.hi == null ? '' : r.hi, oninput: () => { r.hi = hi.value === '' ? '' : +hi.value; touch(); } });
-              const use = h('select', { onchange: () => { r.use = use.value; touch(); } });
-              use.appendChild(h('option', { value: '', text: '（請選擇策略）' }));
-              library().forEach(e => use.appendChild(h('option', { value: e.id, text: e.name })));
-              if (r.use && !strictEntry(r.use)) use.appendChild(h('option', { value: r.use, text: '（已刪除或沒有權限）' }));
-              use.value = r.use || '';
+              const vn = String(r.name || '').trim();
+              const has = library().map(e => e.get()).filter(st => BJ.variantCount(st.variants && st.variants[vn]) > 0).map(st => `${st.name}（${BJ.variantCount(st.variants[vn])} 格）`);
+              const use = h('small', { class: has.length ? '' : 'muted', text: has.length ? has.join('、') : '（還沒有策略設定這個版本）' });
               const up = h('button', { class: 'btn-small', text: '↑', title: '往上移（上面的條件優先）', disabled: i === 0, onclick: () => { [c.rules[i - 1], c.rules[i]] = [c.rules[i], c.rules[i - 1]]; touch(); renderRules(); } });
               const del = h('button', { class: 'btn-small', text: '✕', title: '刪除這個條件', onclick: () => { c.rules.splice(i, 1); touch(); renderRules(); } });
               tbl.appendChild(h('tr', null, h('td', { text: String(i + 1) }), h('td', null, nm), h('td', null, lo), h('td', null, hi), h('td', null, use), h('td', null, up, del)));
             });
           }
-          const addRule = h('button', { class: 'btn-small', text: '＋ 新增條件', onclick: () => { c.rules.push({ name: '條件' + (c.rules.length + 1), lo: '', hi: '', use: '' }); touch(); renderRules(); } });
+          const addRule = h('button', { class: 'btn-small', text: '＋ 新增條件', onclick: () => { c.rules.push({ name: '條件' + (c.rules.length + 1), lo: '', hi: '' }); touch(); renderRules(); } });
           function renderInfo() {
             const m = c.method || 'tc';
-            const lines = c.rules.map((r, i) => `${i + 1}. ${ui.esc(r.name || '條件' + (i + 1))}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)} → <b>${ui.esc(stratName(r.use))}</b>`);
-            lines.push(`其餘 → <b>使用左邊選的策略</b>`);
+            const lines = c.rules.map((r, i) => `${i + 1}. ${ui.esc(r.name || '條件' + (i + 1))}：${METHOD_SHORT[m]} ${rangeText(numOr(r.lo, -Infinity), numOr(r.hi, Infinity), m)} → 使用策略自己的「<b>${ui.esc(r.name || '條件' + (i + 1))}</b>」版本（沒設定就照基本打法）`);
+            lines.push(`其餘 → <b>策略的基本打法</b>`);
             const warns = [];
             c.rules.forEach((r, i) => {
               const a = [numOr(r.lo, -Infinity), numOr(r.hi, Infinity)];
               if (a[0] > a[1]) warns.push(`「${r.name || '條件' + (i + 1)}」的下限大於上限，永遠不會成立`);
-              if (!r.use) warns.push(`「${r.name || '條件' + (i + 1)}」還沒選要改用的策略`);
-              else if (!strictEntry(r.use)) warns.push(`「${r.name || '條件' + (i + 1)}」使用的策略已刪除或沒有權限`);
+              if (c.rules.findIndex(x => String(x.name || '').trim() === String(r.name || '').trim()) !== i) warns.push(`條件名稱「${r.name}」重複：兩個條件會用策略的同一個版本`);
               for (let j = 0; j < i; j++) {
                 const b = [numOr(c.rules[j].lo, -Infinity), numOr(c.rules[j].hi, Infinity)];
                 if (Math.max(a[0], b[0]) <= Math.min(a[1], b[1])) warns.push(`「${r.name || '條件' + (i + 1)}」和上面的「${c.rules[j].name || '條件' + (j + 1)}」範圍重疊，重疊的部分以上面的為準`);
@@ -1373,10 +1406,10 @@
               (warns.length ? `<div class="alert">⚠️ ${warns.map(ui.esc).join('<br>⚠️ ')}</div>` : '');
             const bar = h('div', { class: 'row' });
             if (ce.dirty) {
-              bar.appendChild(h('span', { class: 'unsaved', text: ce.base ? '● 有未儲存的修改' : '● 新的算牌組合，還沒有儲存' }));
+              bar.appendChild(h('span', { class: 'unsaved', text: ce.base ? '● 有未儲存的修改' : '● 新的算牌方式，還沒有儲存' }));
               bar.appendChild(h('button', { class: 'btn-good', text: '💾 儲存', onclick: async () => {
                 if ((await askChanges(ce, { title: '確認儲存', saveText: '💾 確認儲存', cancelText: '取消' })) !== 'save') return;
-                try { await commit(ce); flash('已儲存算牌組合：' + ce.c.name); } catch (e) { flash('儲存失敗：' + e.message, true); }
+                try { await commit(ce); flash('已儲存算牌方式：' + ce.c.name); } catch (e) { flash('儲存失敗：' + e.message, true); }
               } }));
               bar.appendChild(h('button', { class: 'btn-small', text: '↩ 放棄修改', onclick: async () => {
                 const r = await askChanges(ce, { title: '放棄修改？', message: '以下修改會被丟掉' + (ce.base ? '，回到上次儲存的內容。' : '，這個新組合會被移除。'), saveText: '💾 改成儲存', allowDiscard: true, discardText: '確定放棄', cancelText: '取消' });
@@ -1416,47 +1449,64 @@
             h('p', { text: '按上方「＋ 新增空白策略」建立自己的策略，每一格都填完後按「💾 儲存」。' })));
           return;
         }
+        fillVer();
         const s = viewed();
         const editable = !e.builtin;
+        const ver = verSel.value;
+        const vGet = () => (ver && s.variants ? s.variants[ver] : null);
+        const vEnsure = () => { s.variants = s.variants || {}; return s.variants[ver] || (s.variants[ver] = BJ.blankVariant()); };
         const legend = '<small class="muted">H=要牌　S=停牌　D=可加倍就加倍否則要牌　Ds=可加倍就加倍否則停牌　R=可投降就投降否則要牌　Rs=投降否則停牌　P=分牌　·=對子不特別處理（依點數表）</small>' +
           (S.rules.freeDouble ? '<div class="hint">💰 加倍分兩種，由點數自動決定：<b>免D</b> = 兩張硬 9/10/11 <b>免費加倍</b>（贏賠 2 倍注、輸只輸原注）；<b>自D</b> = 其他點數（硬 12 以上、軟牌 A+x、對子）<b>自費加倍</b>（放同額籌碼）。兩種都只補一張。<br>在格子填 D 就是「這手要加倍」；想要「只在免費時加倍、需要自費就不加」，在自費的格子改填 H 或 S 即可。</div>' : '');
         const miss = BJ.missingCells(s), need = BJ.requiredTotal();
         gridBox.appendChild(h('div', { class: 'panel' },
-          h('h3', { text: `${s.name}${editable ? '（點格子切換動作，點左邊的列名稱一次設定整列）' : '（唯讀 — 請先「複製成新策略」再編輯）'}` }),
-          s.partial ? h('div', { class: miss ? 'hint' : 'okbox', text: miss ? `已填 ${need - miss} / ${need} 格，還有 ${miss} 格（顯示「？」）要填，填完才能模擬、當建議或測驗標準` : `✔ ${need} 格都填完了` }) : null,
+          h('h3', { text: `${s.name}${ver ? '［' + ver + '］版本' : ''}${editable ? '（點格子切換動作，點左邊的列名稱一次設定整列）' : '（唯讀 — 請先「複製成新策略」再編輯）'}` }),
+          ver ? h('div', { class: 'ver-hint', html: `正在設定「<b>${ui.esc(ver)}</b>」版本：<span class="inherit-demo">淡色斜體</span>的格子照基本打法，<b>實色有框</b>的是這個牌況要改的打法。點格子依序切換，切到最後會回到「照基本」。使用時選一個有「${ui.esc(ver)}」條件的算牌方式即可。` }) : null,
+          !ver && s.partial ? h('div', { class: miss ? 'hint' : 'okbox', text: miss ? `已填 ${need - miss} / ${need} 格，還有 ${miss} 格（顯示「？」）要填，填完才能模擬、當建議或測驗標準` : `✔ ${need} 格都填完了` }) : null,
           h('div', { html: legend })));
         const section = (title, kind, rows, getCode, setCode, cols) => {
           cols = cols || BJ.DEALER_VALS;
           const tbl = h('table', { class: 'strat' });
           tbl.appendChild(h('tr', null, h('th', { text: '玩家 \\ 莊家' }), cols.map(d => h('th', { text: DEALER_LABEL(d) }))));
-          const codeAt = (key, d) => (C.isFilled(s, kind, key, d) ? getCode(s, key, d) : '?');
-          const cls = c => `cell c-${c === 'Y' ? 'P' : c === 'N' ? '-' : c === '?' ? 'Q' : c}`;
-          const nextCode = c => { const cyc = C.CYCLE[kind]; return c === '?' ? cyc[0] : cyc[(cyc.indexOf(c) + 1) % cyc.length]; };
+          const fk = key => (kind === 'even' ? 0 : key);
+          const isOvr = (key, d) => { const v = vGet(); return !!(ver && v && C.isFilled(v, kind, fk(key), d)); };
+          const codeAt = (key, d) => (isOvr(key, d) ? getCode(vGet(), key, d) : (C.isFilled(s, kind, key, d) ? getCode(s, key, d) : '?'));
+          const cls = (c, key, d) => `cell c-${c === 'Y' ? 'P' : c === 'N' ? '-' : c === '?' ? 'Q' : c}${ver ? (isOvr(key, d) ? ' ovr' : ' inherit') : ''}`;
+          // 版本模式：H → S → … → 回到「照基本」
+          const nextCode = (c, key, d) => {
+            const cyc = C.CYCLE[kind];
+            if (ver && isOvr(key, d)) { const i = cyc.indexOf(c); return i === cyc.length - 1 ? '=' : cyc[i + 1]; }
+            return c === '?' ? cyc[0] : cyc[(cyc.indexOf(c) + 1) % cyc.length];
+          };
+          const apply = (key, d, code) => {
+            if (!ver) { setCode(s, key, d, code); return; }
+            const v = vEnsure();
+            if (code === '=') C.unmarkFilled(v, kind, fk(key), d); else setCode(v, key, d, code);
+          };
           rows.forEach(([key, label]) => {
             const th = h('th', { text: label, class: editable ? 'row-head' : '', title: editable ? '點一下：整列一起切換' : '' });
             const tr = h('tr', null, th);
             const tds = [];
             cols.forEach(d => {
               const code = codeAt(key, d);
-              const td = h('td', { class: cls(code), text: code === '?' ? '？' : cellLabel(kind, key, code) });
-              const paint = () => { const c2 = codeAt(key, d); td.className = cls(c2); td.textContent = c2 === '?' ? '？' : cellLabel(kind, key, c2); };
+              const td = h('td', { class: cls(code, key, d), text: code === '?' ? '？' : cellLabel(kind, key, code) });
+              const paint = () => { const c2 = codeAt(key, d); td.className = cls(c2, key, d); td.textContent = c2 === '?' ? '？' : cellLabel(kind, key, c2); };
               td.addEventListener('click', () => {
                 if (!editable) { flash('唯讀策略不能修改，請先「複製成新策略」', true); return; }
-                setCode(s, key, d, nextCode(codeAt(key, d)));
+                apply(key, d, nextCode(codeAt(key, d), key, d));
                 markDirty(e.id);
                 paint();
-                if (s.partial) renderProgress();
+                if (ver) fillVer(); else if (s.partial) renderProgress();
               });
               tds.push(paint);
               tr.appendChild(td);
             });
             th.addEventListener('click', () => {
               if (!editable) return;
-              const nx = nextCode(codeAt(key, cols[0]));
-              cols.forEach(d => setCode(s, key, d, nx));
+              const nx = nextCode(codeAt(key, cols[0]), key, cols[0]);
+              cols.forEach(d => apply(key, d, nx));
               markDirty(e.id);
               tds.forEach(p => p());
-              if (s.partial) renderProgress();
+              if (ver) fillVer(); else if (s.partial) renderProgress();
             });
             tbl.appendChild(tr);
           });
@@ -1487,7 +1537,7 @@
       renderSegSel();
       renderGrid();
       updateDirty();
-      return { refresh: () => { fillStrat(pick); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); }, updateDirty };
+      return { refresh: () => { fillStrat(pick); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); }, updateDirty, refreshVer: fillVer };
     }
   }
 

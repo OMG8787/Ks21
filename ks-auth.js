@@ -112,6 +112,7 @@
       res.segments = parseSegments(setting['牌況分段']);
       res.seq = parseSeq(setting['智慧加注序列']);
     }
+    if (res.segments.length) res.combo = { kind: 'combo', name: '📄 資料庫牌況分段', method: 'tc', rules: res.segments.map(g => ({ name: g.name, lo: g.lo === -Infinity ? '' : g.lo, hi: g.hi === Infinity ? '' : g.hi })) };
     if (game === 'sangong') return setting ? res : null;
     // 只用本人的列（* 預設列不套用）；依資料庫順序套用，同一格寫兩次以後面的為準（空白格不覆蓋）
     const rows = (data.strategies || []).filter(forGame).filter(mine);
@@ -120,20 +121,14 @@
     const segOf = r => String(r['牌況'] || '').trim() || '基本';
     const base = BJ.cells.materialize(BJ.blankStrategy('資料庫策略'));
     rows.filter(r => segOf(r) === '基本').forEach(r => { res.errors.push(...applyRow(BJ, base, r)); });
-    const known = new Set(['基本', ...res.segments.map(s => s.name)]);
-    // 玩家自己的列用到未定義的牌況才警告；預設(*)列若玩家沒有該分段就直接略過
-    rows.forEach(r => { if (!known.has(segOf(r))) res.errors.push(`牌況「${segOf(r)}」沒有在玩家設定的牌況分段中定義（該列被忽略）`); });
-    if (res.segments.length) {
-      res.strategy = {
-        segmented: true, name: '資料庫策略', base,
-        segments: res.segments.map(sg => {
-          const st = BJ.cloneStrategy(base);
-          st.name = `資料庫策略［${sg.name}］`;
-          rows.filter(r => segOf(r) === sg.name).forEach(r => { res.errors.push(...applyRow(BJ, st, r)); });
-          return Object.assign({}, sg, { strat: st });
-        })
-      };
-    } else res.strategy = base;
+    // 其他牌況的列＝這套策略的「牌況版本」（只改有寫的格子）；牌況分段變成內建的算牌方式
+    base.variants = {};
+    rows.filter(r => segOf(r) !== '基本').forEach(r => {
+      const name = segOf(r);
+      const v = base.variants[name] || (base.variants[name] = BJ.blankVariant());
+      res.errors.push(...applyRow(BJ, v, r));
+    });
+    res.strategy = base;
     res.missing = BJ.missingCells(res.strategy);
     return res;
   }

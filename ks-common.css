@@ -154,3 +154,9 @@ td.best { background: #e5f5ec !important; font-weight: 700; }
 .combo-rules select { max-width: 280px; }
 .combo-select { max-width: 220px; }
 tr.diff-row td { background: #f5f7fb; font-weight: 600; }
+/* 策略的牌況版本：淡色＝照基本、實色有框＝這個版本要改的格子 */
+.strat td.inherit { opacity: .42; font-style: italic; }
+.strat td.ovr { box-shadow: inset 0 0 0 2px #1f2933; }
+.ver-hint { background: #eef4ff; border: 1px solid #b9cdf3; border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
+.inherit-demo { opacity: .5; font-style: italic; }
+.ver-select { max-width: 260px; }

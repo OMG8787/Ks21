@@ -381,6 +381,17 @@
       s.filled = {};
       ['hard', 'soft', 'pair'].forEach(k => { s.filled[k] = fix(o.filled && o.filled[k]); });
     }
+    if (o.override) { // 牌況版本：只記錄要改的格子
+      s.override = true;
+      s.filled = {};
+      ['hard', 'soft', 'pair', 'da', 'even'].forEach(k => { s.filled[k] = fix(o.filled && o.filled[k]); });
+    }
+    if (o.variants && typeof o.variants === 'object') {
+      s.variants = {};
+      Object.keys(o.variants).forEach(k => {
+        try { const v = normalizeStrategy(Object.assign({ pairRulesMap: {} }, o.variants[k], { override: true })); s.variants[k] = v; } catch (e) { /* 略過壞資料 */ }
+      });
+    }
     return s;
   }
 
@@ -445,13 +456,16 @@
     const daCode = (s, t, d) => ((s.dasurrenderMap[d] || []).includes(t) ? 'R' : '-');
     const evenCode = (s, d) => (s.evenMoneyMap && s.evenMoneyMap[d] ? 'Y' : 'N');
     function isFilled(s, kind, key, d) {
-      if (!s.partial || !s.filled || !s.filled[kind]) return true;
+      if ((!s.partial && !s.override) || !s.filled || !s.filled[kind]) return true;
       return (s.filled[kind][d] || []).includes(key);
     }
     function markFilled(s, kind, key, d) {
-      if (!s.partial || !s.filled || !s.filled[kind]) return;
+      if ((!s.partial && !s.override) || !s.filled || !s.filled[kind]) return;
       const a = s.filled[kind][d] || (s.filled[kind][d] = []);
       add(a, key);
+    }
+    function unmarkFilled(s, kind, key, d) {
+      if (s.filled && s.filled[kind] && s.filled[kind][d]) rm(s.filled[kind][d], key);
     }
     function setHard(s, t, d, code) {
       markFilled(s, 'hard', t, d);
@@ -473,8 +487,8 @@
       const k = { P: 'split', D: 'double', R: 'surrender', S: 'stand', H: 'hit' }[code];
       if (k) add(pr[k], pv);
     }
-    function setDA(s, t, d, code) { rm(s.dasurrenderMap[d], t); if (code === 'R') add(s.dasurrenderMap[d], t); }
-    function setEven(s, d, code) { s.evenMoneyMap = s.evenMoneyMap || {}; s.evenMoneyMap[d] = code === 'Y'; }
+    function setDA(s, t, d, code) { markFilled(s, 'da', t, d); rm(s.dasurrenderMap[d], t); if (code === 'R') add(s.dasurrenderMap[d], t); }
+    function setEven(s, d, code) { markFilled(s, 'even', 0, d); s.evenMoneyMap = s.evenMoneyMap || {}; s.evenMoneyMap[d] = code === 'Y'; }
     // 把 fallback（空陣列）展開成明確清單，逐格修改才不會改變其他格子的行為
     function materialize(s) {
       DEALER_VALS.forEach(d => {
@@ -502,7 +516,7 @@
       if (up === 'H' || up === 'S') return up;
       return null;
     }
-    return { hardHit, softHit, hardCode, softCode, pairCode, daCode, evenCode, setHard, setSoft, setPair, setDA, setEven, materialize, CYCLE, normCode, isFilled, markFilled };
+    return { hardHit, softHit, hardCode, softCode, pairCode, daCode, evenCode, setHard, setSoft, setPair, setDA, setEven, materialize, CYCLE, normCode, isFilled, markFilled, unmarkFilled };
   })();
 
   const cloneStrategy = s => {
@@ -518,7 +532,8 @@
       name: s.name, pairRulesMap: s.pairRulesMap, doubleMap, hardDoubleMap: s.hardDoubleMap, softDoubleMap: s.softDoubleMap,
       hitMap: s.hitMap, softHitMap: s.softHitMap, standMap: s.standMap, surrenderMap: s.surrenderMap,
       dasurrenderMap: s.dasurrenderMap, evenMoney: s.evenMoney, evenMoneyTC: s.evenMoneyTC, evenMoneyMap: s.evenMoneyMap,
-      partial: s.partial || undefined, filled: s.partial ? s.filled : undefined,
+      partial: s.partial || undefined, override: s.override || undefined, filled: s.partial || s.override ? s.filled : undefined,
+      variants: s.variants ? Object.fromEntries(Object.keys(s.variants).map(k => [k, exportStrategy(s.variants[k])])) : undefined,
       meta: { exportedAt: new Date().toISOString(), format: 'ks-strategy-v2' }
     }, extra || {});
   }
@@ -551,14 +566,42 @@
      轉成分段策略；由上往下第一個符合的條件生效，都不符合用 base */
   const COMBO_METHODS = { tc: 'True Count', rc: 'Running Count', big: '本局已出現大牌張數', small: '本局已出現小牌張數' };
   const numOr = (x, def) => (x === null || x === undefined || x === '' || !isFinite(+x) ? def : +x);
-  function resolveCombo(base, combo, getStrat) {
-    const errors = [];
-    const segments = (combo.rules || []).map((r, i) => {
-      const st = r.use ? getStrat(r.use) : null;
-      if (!st) errors.push({ rule: i, name: r.name || '條件' + (i + 1), reason: r.use ? 'missing' : 'empty' });
-      return { name: r.name || '條件' + (i + 1), lo: numOr(r.lo, -Infinity), hi: numOr(r.hi, Infinity), strat: st, use: r.use };
+  // 空白的牌況版本：只記錄要改的格子，其餘照基本打法
+  function blankVariant() {
+    const v = normalizeStrategy({ name: '版本', pairRulesMap: {}, hitMap: {} });
+    v.override = true;
+    v.filled = {};
+    ['hard', 'soft', 'pair', 'da', 'even'].forEach(k => { v.filled[k] = {}; DEALER_VALS.forEach(d => { v.filled[k][d] = []; }); });
+    return v;
+  }
+  function variantCount(v) {
+    if (!v || !v.filled) return 0;
+    return Object.keys(v.filled).reduce((n, k) => n + Object.values(v.filled[k]).reduce((a, arr) => a + arr.length, 0), 0);
+  }
+  // 基本打法 ＋ 牌況版本（只改有填的格子）
+  function applyVariant(base, v, label) {
+    const C = cells;
+    const st = C.materialize(cloneStrategy(base));
+    delete st.variants;
+    st.name = base.name + '［' + label + '］';
+    if (!v || !variantCount(v)) return st;
+    DEALER_VALS.forEach(d => {
+      for (let t = 4; t <= 21; t++) if (C.isFilled(v, 'hard', t, d)) C.setHard(st, t, d, C.hardCode(v, t, d));
+      for (let t = 13; t <= 21; t++) if (C.isFilled(v, 'soft', t, d)) C.setSoft(st, t, d, C.softCode(v, t, d));
+      for (let p = 2; p <= 11; p++) if (C.isFilled(v, 'pair', p, d)) C.setPair(st, p, d, C.pairCode(v, p, d));
+      for (let t = 4; t <= 20; t++) if (C.isFilled(v, 'da', t, d)) C.setDA(st, t, d, C.daCode(v, t, d));
     });
-    return { segmented: true, combo: true, name: combo.name, method: combo.method || 'tc', base, segments, errors };
+    [10, 11].forEach(d => { if (C.isFilled(v, 'even', 0, d)) C.setEven(st, d, C.evenCode(v, d)); });
+    return st;
+  }
+  function resolveCombo(base, combo) {
+    const vs = base.variants || {};
+    const segments = (combo.rules || []).map((r, i) => {
+      const name = String(r.name || '條件' + (i + 1)).trim();
+      const v = vs[name];
+      return { name, lo: numOr(r.lo, -Infinity), hi: numOr(r.hi, Infinity), strat: applyVariant(base, v, name), hasVariant: variantCount(v) > 0 };
+    });
+    return { segmented: true, combo: true, name: combo.name, method: combo.method || 'tc', base, segments };
   }
   // 本局目前已出現的牌（莊家第二張要等玩家都結束才發，所以不會被算到）
   function roundCounts(shoe) {
@@ -1019,7 +1062,7 @@
   KS.BJ = {
     BASE_RULES, PRESETS, RULE_FIELDS, OUTCOMES, DEALER_VALS, ACTION_LABEL,
     handInfo, handTotal, isTwoCard21, is777or678, Round, decide, pickSegment, cells, cloneStrategy, normalizeStrategy, exportStrategy,
-    blankStrategy, missingCells, requiredTotal, REQUIRED, resolveCombo, roundCounts, COMBO_METHODS,
+    blankStrategy, missingCells, requiredTotal, REQUIRED, resolveCombo, roundCounts, COMBO_METHODS, blankVariant, applyVariant, variantCount,
     ksDefaultStrategy, dealerDist, standVec, evaluate, toCounts10, generateOptimalStrategy, Simulator, parseRamp
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = KS;
