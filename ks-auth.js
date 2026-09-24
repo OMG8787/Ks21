@@ -140,7 +140,7 @@
   const COOKIE = 'ks_key';
   const COOKIE_DAYS = 400; // 瀏覽器允許的最長期限；每次進站都會自動延長，等同永久
   const cfg = () => (root.KS_CONFIG || {});
-  const API_VERSION = 5; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
+  const API_VERSION = 6; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
   const PW_PREFIX = 'ks-v1|'; // 與 Code.gs 相同
   const MIN_PW = 6;
   // 密碼在瀏覽器先做 SHA-512，網路上不傳明碼（資料庫端會再加鹽雜湊一次）
@@ -187,11 +187,31 @@
       this.apiVersion = j && j.v != null ? +j.v : 0;
       return j;
     },
+    // 背景回報使用者操作（更新「登入裝置」的最後使用）：每分鐘最多一次，不等回應、失敗也不影響畫面
+    trackActivity() {
+      if (this._tracking || !this.enabled()) return;
+      this._tracking = true;
+      const GAP = 60 * 1000;
+      let last = Date.now(); // 剛驗證過登入，伺服器已更新過
+      const ping = () => {
+        const now = Date.now();
+        if (now - last < GAP) return;
+        const key = this.getKey();
+        if (!key) return;
+        last = now;
+        const body = JSON.stringify({ action: 'ping', key });
+        try { if (navigator.sendBeacon && navigator.sendBeacon(cfg().apiUrl, new Blob([body], { type: 'text/plain' }))) return; } catch (e) { /* 改用 fetch */ }
+        try { fetch(cfg().apiUrl, { method: 'POST', body, keepalive: true, mode: 'no-cors' }).catch(() => {}); } catch (e) { /* 忽略 */ }
+      };
+      ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev => window.addEventListener(ev, ping, { capture: true, passive: true }));
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) ping(); });
+    },
     async login(id, pw) {
       const res = await this.post({ action: 'login', id: String(id).trim(), pwh: await hashPw(pw), device: this.device() });
       if (!res.ok) { const e = new Error(res.error || '登入失敗'); e.pending = !!res.pending; throw e; }
       this.setKey(res.key);
       this.user = { id: res.id, name: res.name || res.id, role: res.role || '', mustChange: !!res.mustChange };
+      this.trackActivity();
       return this.user;
     },
     // 新增帳號：送出後為「待審核」，要等管理員開通
@@ -219,6 +239,7 @@
       }
       this.setKey(key); // 延長 cookie 期限
       this.user = { id: res.id, name: res.name || res.id, role: res.role || '', mustChange: !!res.mustChange };
+      this.trackActivity();
       return this.user;
     },
     // 帳號設定：目前密碼必填；newId 改了會連動所有資料
@@ -272,6 +293,7 @@
           this.game = game;
           this.user = { id: res.id, name: res.name || res.id, role: res.role || '' };
           this.data = res.data || {};
+          this.trackActivity();
           overlay.remove();
           cb();
           return;
