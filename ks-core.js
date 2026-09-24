@@ -72,6 +72,7 @@
       this.withSuits = !!o.withSuits;
       this.onDraw = null;     // 每發一張牌的回呼（算牌用）
       this.onShuffle = null;
+      this.onReturn = null;   // 牌收回牌靴的回呼（算牌扣回用）
       this.total = RANKS.reduce((s, r) => s + (this.counts[r] || 0), 0);
       if (this.total <= 0) throw new Error('牌組是空的，請至少設定一張牌');
       this.shuffle();
@@ -90,6 +91,7 @@
       RANKS.forEach(r => { if (this.rem[r] == null) this.rem[r] = 0; });
       this.dealt = 0;
       this.roundCards = [];
+      this.returned = [];
       this.shuffles = (this.shuffles || 0) + 1;
       if (this.onShuffle) this.onShuffle();
     }
@@ -97,6 +99,7 @@
     _refillMidRound() {
       const c = Object.assign({}, this.counts);
       this.roundCards.forEach(x => { c[rankOf(x)]--; });
+      this.returned.forEach(x => { c[rankOf(x)]++; }); // 已收回牌靴的牌不在桌上
       RANKS.forEach(r => { if (c[r] < 0) c[r] = 0; });
       this.cards = shuffleArray(this._buildCards(c));
       this.rem = c;
@@ -132,7 +135,17 @@
       }
       return null;
     }
-    endRound() { this.roundCards = []; }
+    // 局中把牌收回牌靴，各自洗進隨機位置（爆牌、投降、先領錢的手）
+    returnCards(cards) {
+      cards.forEach(c => {
+        this.cards.splice(Math.floor(rand() * (this.cards.length + 1)), 0, c);
+        this.rem[rankOf(c)]++;
+        this.dealt--;
+        this.returned.push(c);
+        if (this.onReturn) this.onReturn(c);
+      });
+    }
+    endRound() { this.roundCards = []; this.returned = []; }
     needsShuffle() { return this.dealt >= this.total * this.penetration; }
     size() { return this.cards.length; }
     decksRemaining() { return this.cards.length / 52; }
@@ -183,6 +196,7 @@
       this.seen = 0;
     }
     see(c) { this.rc += this.sys.tags[idx10(c)]; this.seen++; }
+    unsee(c) { this.rc -= this.sys.tags[idx10(c)]; this.seen--; } // 牌收回牌靴：當作沒看過
     tag(c) { return this.sys.tags[idx10(c)]; }
     // True Count = RC / 剩餘副數（至少 0.25 副避免除以 0）
     trueCount(cardsRemaining) {

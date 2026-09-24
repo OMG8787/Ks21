@@ -34,23 +34,24 @@
     freeDouble: false,          // 兩張硬 9/10/11 免費加倍（22點）
     freeSplit: false,           // 分牌免費：分出來的手贏照賠、輸不扣錢（22點）
     surrender: 'any2',          // 'any2' 任何未要牌的兩張 | 'first' 只限第一個動作 | 'none'
-    surrenderAfterDouble: false // 加倍後投降
+    surrenderAfterDouble: false,// 加倍後投降
+    returnSettledCards: false   // 爆牌、投降、先領錢的手牌立即收回牌靴洗牌
   };
 
   const PRESETS = {
     american: Object.assign({}, BASE_RULES, {
       name: '美式21點', dealerHitSoft17: false, evenMoney: true, bjVsDealerBJ: 'push',
-      bonus777: true, maxHands: 7, surrender: 'any2'
+      bonus777: true, maxHands: 7, surrender: 'any2', returnSettledCards: true
     }),
     british: Object.assign({}, BASE_RULES, {
       name: '英式21點', dealerHitSoft17: true, bjPaidImmediately: true, bjVsDealerBJ: 'pay',
       any21Wins: true, bonus777: true, aaSplitVsBJHalf: true, maxHands: 3,
-      surrender: 'any2', surrenderAfterDouble: true, defaultNo10: true
+      surrender: 'any2', surrenderAfterDouble: true, defaultNo10: true, returnSettledCards: true
     }),
     star22: Object.assign({}, BASE_RULES, {
       name: '麗星郵輪22點', dealerHitSoft17: true, evenMoney: true, bjVsDealerBJ: 'push',
       dealerBJOriginalOnly: true, dealer22Push: true, maxHands: 4, resplitAces: false,
-      splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first'
+      splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first', returnSettledCards: true
     })
   };
 
@@ -77,7 +78,8 @@
     ['freeDouble', 'bool', '兩張硬 9/10/11 免費加倍（贏賠 2 倍注、輸只輸原注，其他加倍自費）'],
     ['freeSplit', 'bool', '分牌免費：分出來的每一手贏照賠一注、輸了不扣錢（原本那手照常輸贏）'],
     ['surrender', ['any2', 'first', 'none'], '投降：any2=任何未要牌兩張（含分牌後）；first=只限第一個動作；none=不可'],
-    ['surrenderAfterDouble', 'bool', '加倍後可投降（退回原注）']
+    ['surrenderAfterDouble', 'bool', '加倍後可投降（退回原注）'],
+    ['returnSettledCards', 'bool', '爆牌、投降、先領錢（BJ 立即賠、先收 1 倍、21 點必勝）的手牌立即收回牌靴洗牌（同一局就可能再發出來）']
   ];
 
   /* ---------------- 手牌計算 ---------------- */
@@ -146,9 +148,16 @@
         }
         s.hands.push(h);
       });
+      if (this.rules.bjPaidImmediately) this.seats.forEach(s => s.hands.forEach(h => { if (h.isBJ && h.done) this._collect(h); }));
       this.phase = 'player';
       this._advance();
       return this;
+    }
+    // 已經結算的手（爆牌、投降、先領錢）：牌收回牌靴洗牌
+    _collect(hand) {
+      if (!this.rules.returnSettledCards || hand.returned) return;
+      hand.returned = true;
+      this.shoe.returnCards(hand.cards.slice());
     }
     current() {
       if (!this.cur) return null;
@@ -232,6 +241,10 @@
         case 'surrender': hand.surrendered = true; hand.pendingDA = false; hand.done = true; break;
         default: throw new Error('未知動作 ' + action);
       }
+      const R = this.rules;
+      seat.hands.forEach(x => {
+        if (x.bust || x.surrendered || x.evenMoney || (R.any21Wins && x.done && !x.pendingDA && handTotal(x.cards) === 21)) this._collect(x);
+      });
       if (hand.done) this._advance();
       return this;
     }
@@ -241,7 +254,8 @@
       const R = this.rules;
       this.dealer.push(this.shoe.draw());
       this.dealerBJ = isTwoCard21(this.dealer);
-      const live = this.seats.some(s => s.hands.some(h => !h.bust && !h.surrendered && !h.isBJ && !h.evenMoney));
+      // 已經先領錢的手（BJ、先收1倍、英式 21 點必勝）不需要莊家補牌
+      const live = this.seats.some(s => s.hands.some(h => !h.bust && !h.surrendered && !h.isBJ && !h.evenMoney && !(R.any21Wins && handTotal(h.cards) === 21)));
       this.dealerPlayedOut = false;
       if (!this.dealerBJ && live) {
         for (;;) {
@@ -285,7 +299,10 @@
           } else if (h.surrendered) { p = -h.stake * R.surrenderLoss; res = 'L'; h.note = '投降'; }
           else if (h.bust) { p = -h.stake; res = 'L'; h.note = '爆牌'; }
           else if (dBJ) {
-            if (R.any21Wins && t === 21) { p = h.win * R.winPayout; res = 'W'; h.note = '21點必勝'; }
+            if (R.any21Wins && t === 21) { // 21 點先領錢：777/678 照樣拿獎金
+              const bonus = R.bonus777 && is777or678(h.cards);
+              p = h.win * (bonus ? R.bonus777Pay : R.winPayout); res = 'W'; h.note = bonus ? '777/678獎金' : '21點必勝';
+            }
             else if (R.aaSplitVsBJHalf && h.fromAA && h.fromSplit && upA) { p = -h.stake * 0.5; res = 'L'; h.note = 'AA分牌對BJ輸半注'; }
             else { p = -h.stake; res = 'L'; h.note = '莊BJ'; }
           } else {
@@ -938,6 +955,7 @@
       this.counter = new KS.Counter(cfg.countSystem || 'hilo', this.shoe.total);
       this.shoe.onDraw = c => this.counter.see(c);
       this.shoe.onShuffle = () => this.counter.reset(this.shoe.total);
+      this.shoe.onReturn = c => this.counter.unsee(c);
       this.round = 0;
       this.logs = [];
       this.seatState = cfg.seats.map(() => ({ boostIdx: 0 }));

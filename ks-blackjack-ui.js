@@ -690,6 +690,7 @@
         counter = new KS.Counter(S.countSystem, shoe.total);
         shoe.onDraw = c => counter.see(c);
         shoe.onShuffle = () => counter.reset(shoe.total);
+        shoe.onReturn = c => counter.unsee(c);
         lastMsg = msg || '已建立新牌靴並洗牌';
         return true;
       }
@@ -796,7 +797,7 @@
       function handHtml(x, active) {
         const t = BJ.handInfo(x.cards);
         const res = x.result ? ` <span class="res-${x.result}">${RES_LABEL[x.result]} ${ui.signed(x.profit, 0)}${x.note ? '（' + ui.esc(x.note) + '）' : ''}</span>` : '';
-        const tags = [x.isBJ ? 'BJ' : '', x.doubled ? (x.freeDouble ? '免費加倍' : '加倍') : '', x.surrendered ? '投降' : '', x.bust ? '爆牌' : '', x.fromSplit ? '分牌' : ''].filter(Boolean).join('・');
+        const tags = [x.isBJ ? 'BJ' : '', x.doubled ? (x.freeDouble ? '免費加倍' : '加倍') : '', x.surrendered ? '投降' : '', x.bust ? '爆牌' : '', x.fromSplit ? '分牌' : '', x.returned ? '牌已收回牌靴' : ''].filter(Boolean).join('・');
         return `<div class="hand${active ? ' active' : ''}">${x.cards.map(c => ui.cardHtml(c)).join('')}
           <div class="sum">${t.soft && t.total < 21 ? '軟' : ''}${t.total}${tags ? '・' + tags : ''}　${x.freeSplit ? `免費手（輸不扣、贏 ${x.win}）` : `注 ${x.stake}${x.win !== x.stake ? '，贏 ' + x.win : ''}`}${res}</div></div>`;
       }
