@@ -28,7 +28,7 @@ small, .muted { color: var(--muted); }
 .grid2 { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
 
-input[type=number], input[type=text], select {
+input[type=number], input[type=text], input[type=password], select {
   font: inherit; height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; min-width: 60px;
 }
 input[type=number] { width: 90px; }
