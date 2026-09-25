@@ -267,13 +267,13 @@
     const METHOD_HELP = [
       ['tc', 'Running Count ÷ 剩餘副數（最少算 0.25 副）', '洗牌後一路累積', '例：RC +6、剩 3 副 → TC +2（取整數，+2.9 算 +2）'],
       ['rc', '已出現的牌照算牌系統加減的總和（Hi-Lo：2～6 +1、7～9 0、10/J/Q/K/A −1）', '洗牌後一路累積', '例：出現 5、3、K → +1 +1 −1 ＝ +1'],
-      ['big', '這一局已打開的 10、J、Q、K、A 共幾張', '只算這一局，下一局歸零', '例：你 10、6，莊家明牌 10，同桌 K、A → 4 張'],
-      ['small', '這一局已打開的 2～6 共幾張（7、8、9 不算）', '只算這一局，下一局歸零', '例：你 5、4，莊家明牌 6，同桌 9 → 3 張']
+      ['big', '這一局還在桌上的 10、J、Q、K、A 共幾張', '只算這一局，下一局歸零', '例：你 10、6，莊家明牌 10，同桌 K、A → 4 張'],
+      ['small', '這一局還在桌上的 2～6 共幾張（7、8、9 不算）', '只算這一局，下一局歸零', '例：你 5、4，莊家明牌 6，同桌 9 → 3 張']
     ];
     function methodHelp(m) {
       return '<div class="table-wrap"><table class="method-help-table"><tr><th>計算方式</th><th>看什麼</th><th>累積範圍</th><th>舉例</th></tr>' +
         METHOD_HELP.map(([k, what, span, ex]) => `<tr class="${k === m ? 'on' : ''}"><td>${k === m ? '👉 ' : ''}<b>${BJ.COMBO_METHODS[k]}</b></td><td>${what}</td><td>${span}</td><td>${ex}</td></tr>`).join('') +
-        '</table></div><small class="muted">・「已打開」包含桌上所有玩家的牌和莊家明牌；莊家暗牌翻開前不算。局中要牌後數字會變，同一手牌前後的決策可能套用不同條件。<br>' +
+        '</table></div><small class="muted">・「還在桌上」包含所有玩家的牌和莊家明牌；莊家暗牌翻開前不算；爆牌、投降、先領錢（BJ、先收 1 倍）已收回牌靴的牌不算。局中要牌後數字會變，同一手牌前後的決策可能套用不同條件。<br>' +
         '・TC／RC 用「規則與牌組」選的算牌系統（預設 Hi-Lo）；選 KO 這類非平衡系統時，TC 直接用 RC。<br>' +
         '・每局洗牌（22 點預設）時 TC／RC 每局都從 0 開始，只反映本局的牌；這時用大牌／小牌張數較直觀。</small>';
     }
@@ -848,7 +848,7 @@
             <div class="stat"><b>${(shoe.dealt / shoe.total * 100).toFixed(0)}%</b><span>${S.shuffleMode === 'round' ? '本局已發出（每局洗牌）' : '已發出（切牌卡 ' + S.pen + '%）'}</span></div></div>` +
             (S.shuffleMode === 'round' ? '<small class="muted">每局洗牌：每局開始時牌全部放回，RC/TC 歸零，只反映本局發出的牌。</small>' : '');
           const rc2 = BJ.roundCounts(shoe);
-          inf += `<div class="stat-grid" style="margin-top:6px"><div class="stat"><b>${rc2.big}</b><span>本局已出現大牌（10/J/Q/K/A）</span></div><div class="stat"><b>${rc2.small}</b><span>本局已出現小牌（2–6）</span></div></div>`;
+          inf += `<div class="stat-grid" style="margin-top:6px"><div class="stat"><b>${rc2.big}</b><span>本局桌上大牌（10/J/Q/K/A）</span></div><div class="stat"><b>${rc2.small}</b><span>本局桌上小牌（2–6）</span></div></div>`;
           const as = resolveFor(advStrat.value, advCombo.value);
           if (as && as.segmented) {
             const ctx = playCtx();

@@ -79,7 +79,7 @@
     ['freeSplit', 'bool', '分牌免費：分出來的每一手贏照賠一注、輸了不扣錢（原本那手照常輸贏）'],
     ['surrender', ['any2', 'first', 'none'], '投降：any2=任何未要牌兩張（含分牌後）；first=只限第一個動作；none=不可'],
     ['surrenderAfterDouble', 'bool', '加倍後可投降（退回原注）'],
-    ['returnSettledCards', 'bool', '爆牌、投降、先領錢（BJ 立即賠、先收 1 倍、21 點必勝）的手牌立即收回牌靴洗牌（同一局就可能再發出來）']
+    ['returnSettledCards', 'bool', '爆牌、投降、先領錢的手牌立即收回牌靴洗牌（同一局就可能再發出來）。先領錢：BJ 確定贏（莊家明牌不是 A/10 點，或英式立即賠）、先收 1 倍、英式 21 點必勝']
   ];
 
   /* ---------------- 手牌計算 ---------------- */
@@ -148,7 +148,9 @@
         }
         s.hands.push(h);
       });
-      if (this.rules.bjPaidImmediately) this.seats.forEach(s => s.hands.forEach(h => { if (h.isBJ && h.done) this._collect(h); }));
+      // BJ 已經確定贏（立即賠，或莊家明牌不是 A/10 點不可能 BJ）→ 牌馬上收回；莊家明牌 A/10 點要等莊家翻牌（選先收 1 倍時再收）
+      const upV = dealerUpValue(this.dealer[0]);
+      this.seats.forEach(s => s.hands.forEach(h => { if (h.isBJ && h.done && (this.rules.bjPaidImmediately || upV < 10)) this._collect(h); }));
       this.phase = 'player';
       this._advance();
       return this;
@@ -622,8 +624,16 @@
   }
   // 本局目前已出現的牌（莊家第二張要等玩家都結束才發，所以不會被算到）
   function roundCounts(shoe) {
+    // 只算還在桌上的牌：已收回牌靴的牌（爆牌、投降、先領錢）不算
+    const back = {};
+    (shoe.returned || []).forEach(c => { const r = rankOf(c); back[r] = (back[r] || 0) + 1; });
     let big = 0, small = 0;
-    (shoe.roundCards || []).forEach(c => { const v = bjValue(c); if (v >= 10) big++; else if (v <= 6) small++; });
+    (shoe.roundCards || []).forEach(c => {
+      const r = rankOf(c);
+      if (back[r] > 0) { back[r]--; return; }
+      const v = bjValue(c);
+      if (v >= 10) big++; else if (v <= 6) small++;
+    });
     return { big, small };
   }
 
