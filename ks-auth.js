@@ -140,7 +140,7 @@
   const COOKIE = 'ks_key';
   const COOKIE_DAYS = 400; // 瀏覽器允許的最長期限；每次進站都會自動延長，等同永久
   const cfg = () => (root.KS_CONFIG || {});
-  const API_VERSION = 6; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
+  const API_VERSION = 8; // 需要的 Google 端程式版本（sheet/Code.gs 的 API_VERSION）
   const PW_PREFIX = 'ks-v1|'; // 與 Code.gs 相同
   const MIN_PW = 6;
   // 密碼在瀏覽器先做 SHA-512，網路上不傳明碼（資料庫端會再加鹽雜湊一次）
@@ -325,6 +325,28 @@
       const res = await this.post({ action: 'deleteStrategy', key: this.getKey(), game, sid });
       if (!res.ok) { if (res.kicked) { this.clearKey(); this.toLogin(res.error); } throw new Error(res.error || '刪除失敗'); }
     },
+    /* ---------- 管理者 ---------- */
+    async adminCall(action, extra) {
+      const res = await this.post(Object.assign({ action, key: this.getKey() }, extra || {}));
+      if (!res.ok) {
+        if (res.kicked) { this.clearKey(); this.toLogin(res.error); }
+        if (res.error === '未知的動作') throw new Error('資料庫程式不是最新版，請管理者重新部署後再試');
+        throw new Error(res.error || '操作失敗');
+      }
+      return res;
+    },
+    // 其他玩家的策略（唯讀）：[{ id, name, saved:[{sid,name,obj,updated}], sheet: buildForGame 結果或 null }]
+    async othersForGame(game) {
+      const res = await this.adminCall('othersStrategies', { game });
+      return (res.players || []).map(p => ({
+        id: p.id, name: p.name || p.id,
+        saved: (p.saved || []).map(r => { try { return { sid: r.sid, name: r.name, obj: JSON.parse(r.data), updated: r.updated }; } catch (e) { return null; } }).filter(Boolean),
+        sheet: KS.BJ || game === 'sangong' ? buildForGame(KS.BJ, { settings: p.settings || [], strategies: p.strategies || [] }, p.id, game) : null
+      }));
+    },
+    adminDevices() { return this.adminCall('adminDevices'); },
+    adminKick(hash) { return this.adminCall('adminKick', { hash }); },
+    adminApprove(id) { return this.adminCall('adminApprove', { id }); },
     // 練習成績：登入時存資料庫，本機模式存這台電腦
     async saveScore(game, kind, rec) {
       if (!this.loggedIn()) {

@@ -42,6 +42,10 @@
     const customTags = store.get('ks_custom_tags', null);
     if (Array.isArray(customTags) && customTags.length === 10) KS.COUNT_SYSTEMS.custom.tags = customTags.map(Number);
     const ONLINE = !!(KS.auth && KS.auth.loggedIn());
+    // 管理者：可選擇顯示其他玩家的策略（唯讀，可模擬、測驗、複製）
+    const IS_ADMIN = ONLINE && KS.auth.isAdmin();
+    S.others = [];
+    let othersOn = IS_ADMIN && !!store.get(K('showOthers'), false), othersState = '', othersInfo = null;
     function loadSavedFromSheet() {
       const list = [];
       KS.auth.savedStrategies().forEach(x => {
@@ -256,7 +260,36 @@
       if (S.sheet) list.push({ id: 'sheet', name: `📄 資料庫策略（${KS.auth.user.name}）${missText(BJ.missingCells(S.sheet.strategy))}`, builtin: true, get: () => S.sheet.strategy });
       if (canSeeOptimal()) list.push({ id: 'opt', name: '最佳基本策略（管理者專用・依目前規則自動計算）', builtin: true, get: optimal });
       S.user.forEach(u => list.push({ id: u.id, name: u.s.name + missText(BJ.missingCells(u.s)) + (u.dirty ? '（● 未儲存）' : ''), builtin: false, get: () => u.s }));
+      if (othersOn) S.others.forEach(o => list.push(o));
       return list;
+    }
+    async function loadOthers() {
+      if (!IS_ADMIN) return;
+      othersState = 'loading';
+      if (othersInfo) othersInfo();
+      try {
+        const players = await KS.auth.othersForGame(preset);
+        const list = [];
+        players.forEach(p => {
+          const who = `👥 ${p.name}（${p.id}）｜`;
+          if (p.sheet && p.sheet.strategy) {
+            const st = p.sheet.strategy;
+            list.push({ id: `o:${p.id}:sheet`, name: who + '📄 資料庫策略' + missText(BJ.missingCells(st)), builtin: true, other: true, get: () => st });
+          }
+          p.saved.forEach(x => {
+            if (!x.obj || x.obj.kind === 'combo') return; // 只列策略，不列算牌方式
+            try {
+              const st = BJ.normalizeStrategy(x.obj);
+              st.name = x.name || st.name;
+              list.push({ id: `o:${p.id}:${x.sid}`, name: who + st.name + missText(BJ.missingCells(st)), builtin: true, other: true, get: () => st });
+            } catch (e) { /* 略過壞資料 */ }
+          });
+        });
+        S.others = list;
+        othersState = players.length ? `已載入 ${players.length} 位玩家、${list.length} 套策略` : '其他玩家在這個遊戲還沒有策略';
+      } catch (e) { othersState = '讀取失敗：' + e.message; }
+      refreshStratSelects();
+      if (othersInfo) othersInfo();
     }
     const libEntry = id => library().find(x => x.id === id) || library()[0] || null;
     const getStrat = id => { const e = libEntry(id); return e ? e.get() : null; };
@@ -402,6 +435,7 @@
     buildDrillPane(tabs.panes.drill);
     const quizPane = buildQuizPane(tabs.panes.quiz);
     stratPane = buildStratPane(tabs.panes.strat);
+    if (othersOn) loadOthers();
     if (KS.auth) KS.auth.onBeforeLeave = () => (dirtyList().length ? resolveDirty('離開這個頁面') : true);
     if (ONLINE) {
       KS.auth.onBeforeReload = async () => { if (!(await resolveDirty('重新讀取資料庫'))) throw new Error('已取消重新讀取'); };
@@ -418,6 +452,7 @@
         quizPane.renderQuizSeg();
         stratPane.refresh();
         play.render();
+        if (othersOn) loadOthers();
       };
     }
     const lastTab = store.get('ks_tab_' + location.pathname, null);
@@ -1326,11 +1361,29 @@
         h('div', { class: 'row' }, '策略', pick, segWrap, verWrap,
           h('button', { class: 'btn-good', text: '＋ 新增空白策略', onclick: () => { const n = prompt('新策略名稱', '我的策略'); if (n) addUser(BJ.blankStrategy(n), n, '空白').then(id => { if (id) flash('已建立「' + n + '」：點格子（或點左邊的列名稱一次設定整列）填完後按「💾 儲存」'); }); } }),
           h('button', { class: 'btn-small', text: '複製成新策略（可編輯）', onclick: () => { if (!viewed()) return flash('目前沒有可以複製的策略', true); const n = prompt('新策略名稱', viewed().name.replace(/（.*）/, '') + ' 副本'); if (n) { const from = viewed().name; addUser(viewed(), n, from).then(id => { if (id) flash('已建立「' + n + '」，編輯後請按「💾 儲存」'); }); } } }),
-          h('button', { class: 'btn-small', text: '重新命名', onclick: () => { const e = cur(); if (!e || e.builtin) return flash('內建策略不能改名，請先複製', true); const n = prompt('新名稱', e.name); if (n) { e.get().name = n; markDirty(e.id); renderGrid(); } } }),
-          h('button', { class: 'btn-small', text: '刪除', onclick: () => { const e = cur(); if (!e || e.builtin) return flash('內建策略不能刪除', true); if (!confirm(`刪除「${e.get().name}」？${ONLINE ? '（會從資料庫刪除）' : ''}`)) return; removeUser(e.id); fillStrat(pick, defStrat()); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); } }),
+          h('button', { class: 'btn-small', text: '重新命名', onclick: () => { const e = cur(); if (!e || e.builtin) return flash(e && e.other ? '其他玩家的策略是唯讀的，請先「複製成新策略」' : '內建策略不能改名，請先複製', true); const n = prompt('新名稱', e.name); if (n) { e.get().name = n; markDirty(e.id); renderGrid(); } } }),
+          h('button', { class: 'btn-small', text: '刪除', onclick: () => { const e = cur(); if (!e || e.builtin) return flash(e && e.other ? '其他玩家的策略是唯讀的，不能刪除' : '內建策略不能刪除', true); if (!confirm(`刪除「${e.get().name}」？${ONLINE ? '（會從資料庫刪除）' : ''}`)) return; removeUser(e.id); fillStrat(pick, defStrat()); lastPick = pick.value; renderSegSel(); renderGrid(); updateDirty(); } }),
           h('button', { class: 'btn-small', text: '⬇ 匯出 JSON', onclick: () => { const v = viewed(); if (!v) return; ui.download(`ks_rules_${v.name.replace(/[\\/:*?"<>|（）()［］ ]+/g, '_')}.json`, JSON.stringify(BJ.exportStrategy(v, { boostSequence: S.boostSeq }), null, 2)); } })),
+        IS_ADMIN ? othersRow() : null,
         dirtyBar, drop, fileInp, msg,
         h('small', { class: 'muted', text: '修改策略後要按「💾 儲存」才會寫入' + (ONLINE ? '資料庫' : '這台電腦') + '；還沒儲存就離開時會提醒你。「資料庫策略」是唯讀的，請直接改資料庫後按上方「重新讀取資料庫」。' })));
+      // 管理者：顯示其他玩家的策略
+      function othersRow() {
+        const note = h('small', { class: 'muted' });
+        const chk = h('input', { type: 'checkbox', checked: othersOn, onchange: () => {
+          othersOn = chk.checked;
+          store.set(K('showOthers'), othersOn);
+          if (othersOn && !S.others.length && othersState !== 'loading') loadOthers();
+          else { refreshStratSelects(); othersInfo(); }
+        } });
+        const again = h('button', { class: 'btn-small', text: '🔄 重新讀取', onclick: () => loadOthers() });
+        othersInfo = () => {
+          note.textContent = othersOn ? (othersState === 'loading' ? '讀取中…' : othersState) : '';
+          again.hidden = !othersOn;
+        };
+        othersInfo();
+        return h('div', { class: 'row' }, h('label', null, chk, ' 👥 顯示其他玩家的策略（管理者專用・唯讀：可以模擬、測驗，或「複製成新策略」存成自己的）'), again, note);
+      }
       /* ---------- 🧮 算牌方式編輯器 ---------- */
       function buildComboEditor() {
         const box = h('div', { class: 'panel combo-panel' });

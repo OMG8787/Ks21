@@ -24,6 +24,11 @@
     .login-links { display: flex; justify-content: space-between; margin: 10px 0 6px; }
     .login-links a { color: var(--accent); text-decoration: none; }
     .login-links a:hover { text-decoration: underline; }
+    .adm-sum { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 0 10px; }
+    .adm-table td { vertical-align: middle; }
+    .adm-table td.dev { max-width: 260px; word-break: break-all; }
+    .adm-table tr.idle td { color: var(--muted); }
+    .adm-tag { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 6px; background: #fde8e8; color: var(--bad); margin-left: 4px; }
   </style>
 </head>
 
@@ -164,7 +169,7 @@
         app.innerHTML = '';
         app.appendChild(h('h1', { text: '🃏 KS 牌桌模擬器' }));
         const bar = h('div', { class: 'topbar' });
-        let account = null;
+        let account = null, admin = null;
         if (!auth.enabled()) bar.appendChild(h('span', { class: 'muted', text: '本機模式：ks-config.js 尚未設定 apiUrl，不需登入，策略只存在這台電腦。' }));
         else {
           bar.appendChild(h('span', { text: `👤 ${auth.user.name}（${auth.user.id}${auth.roleText()}）` }));
@@ -172,6 +177,10 @@
           if (auth.outdated()) bar.appendChild(h('span', { class: 'alert', style: { margin: 0, padding: '2px 8px' }, text: '⚠️ 資料庫程式不是最新版，請管理者重新部署' }));
           account = renderAccount();
           bar.appendChild(h('button', { class: 'btn-small', text: '⚙️ 帳號設定', onclick: () => { account.hidden = !account.hidden; if (!account.hidden) account.querySelector('input').focus(); } }));
+          if (auth.isAdmin()) {
+            admin = renderAdmin();
+            bar.appendChild(h('button', { class: 'btn-small', text: '🛠 管理', onclick: () => { admin.hidden = !admin.hidden; if (!admin.hidden) admin.open(); } }));
+          }
           bar.appendChild(h('button', { class: 'btn-small', text: '登出', onclick: async e => { e.target.disabled = true; await auth.logout(); renderLogin(); } }));
         }
         app.appendChild(bar);
@@ -179,9 +188,88 @@
           app.appendChild(account);
           account.hidden = location.hash !== '#account';
         }
+        if (admin) {
+          app.appendChild(admin);
+          admin.hidden = location.hash !== '#admin';
+          if (!admin.hidden) admin.open();
+        }
         app.appendChild(h('div', { class: 'games' }, GAMES.map(g => h('a', { class: 'game', href: g.file },
           h('div', { class: 'icon', text: g.icon }), h('h3', { text: g.name }), h('small', { class: 'muted', text: g.desc }),
           h('small', { text: g.key === 'sangong' ? '📊 模擬　🎮 逐局遊戲' : '📊 模擬　🎮 逐牌遊戲　🧮 算牌練習　❓ 測驗' })))));
+      }
+
+      // 管理（管理者）：登入裝置、使用中帳號、踢除裝置、開通待審核帳號
+      function renderAdmin() {
+        const ACTIVE = 5 * 60e3, RECENT = 30 * 60e3;
+        const info = h('div'), pendBox = h('div'), devBox = h('div');
+        const filter = h('input', { type: 'text', placeholder: '篩選 ID／名稱／裝置', oninput: () => draw() });
+        const onlyActive = h('input', { type: 'checkbox', onchange: () => draw() });
+        const refreshBtn = h('button', { class: 'btn-small', text: '🔄 重新整理', onclick: () => load() });
+        let data = null, loadedAt = 0, timer = null;
+        const ago = ms => (ms < 60e3 ? '剛剛' : ms < 3600e3 ? Math.floor(ms / 60e3) + ' 分鐘前' : ms < 86400e3 ? Math.floor(ms / 3600e3) + ' 小時前' : Math.floor(ms / 86400e3) + ' 天前');
+        const when = x => { const d = new Date(x); return isNaN(d) ? (x || '—') : d.toLocaleString(); };
+        const elapsed = last => { const t = Date.parse(last); return isNaN(t) ? Infinity : Date.parse(data.now) + (Date.now() - loadedAt) - t; };
+        const state = ms => (ms <= ACTIVE ? ['🟢', '使用中'] : ms <= RECENT ? ['🟡', '剛離開'] : ['⚪', '閒置']);
+        async function load() {
+          refreshBtn.disabled = true;
+          if (!data) info.innerHTML = '<p class="muted">讀取中…</p>';
+          try { data = await auth.adminDevices(); loadedAt = Date.now(); draw(); }
+          catch (e) { info.innerHTML = alertBox(e.message); }
+          refreshBtn.disabled = false;
+        }
+        function draw() {
+          if (!data) return;
+          const devs = data.devices.map(d => Object.assign({ ms: elapsed(d.last) }, d)).sort((a, b) => a.ms - b.ms);
+          const act = devs.filter(d => d.ms <= ACTIVE), rec = devs.filter(d => d.ms > ACTIVE && d.ms <= RECENT);
+          const ids = list => new Set(list.map(d => d.id)).size;
+          info.innerHTML = '';
+          info.appendChild(h('div', { class: 'adm-sum' },
+            h('span', { html: `🟢 <b>使用中</b>：${ids(act)} 個帳號（${act.length} 台裝置）` }),
+            h('span', { html: `🟡 <b>剛離開</b>（30 分鐘內）：${ids(rec)} 個帳號` }),
+            h('span', { text: `登入中的裝置共 ${devs.length} 台、${ids(devs)} 個帳號` }),
+            h('small', { class: 'muted', text: '更新時間 ' + new Date(loadedAt).toLocaleTimeString() })));
+          // 待審核帳號
+          pendBox.innerHTML = '';
+          pendBox.appendChild(h('h4', { text: `⏳ 待審核的申請（${data.pending.length}）` }));
+          if (!data.pending.length) pendBox.appendChild(h('p', { class: 'muted', text: '目前沒有待審核的申請' }));
+          else pendBox.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'adm-table' },
+            h('tr', null, h('th', { text: 'ID' }), h('th', { text: '名稱' }), h('th', { text: '' })),
+            data.pending.map(p => h('tr', null, h('td', { text: p.id }), h('td', { text: p.name || '—' }), h('td', null,
+              h('button', { class: 'btn-small', text: '✔ 開通', onclick: async e => {
+                if (!confirm(`開通帳號「${p.name || p.id}」（${p.id}）？開通後就可以登入。`)) return;
+                e.target.disabled = true;
+                try { await auth.adminApprove(p.id); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
+              } })))))));
+          // 登入裝置
+          const q = filter.value.trim().toLowerCase();
+          const shown = devs.filter(d => (!onlyActive.checked || d.ms <= ACTIVE) && (!q || [d.id, d.name, d.device].some(x => String(x).toLowerCase().includes(q))));
+          devBox.innerHTML = '';
+          devBox.appendChild(h('h4', { text: `💻 登入裝置（顯示 ${shown.length} / ${devs.length}）` }));
+          if (!shown.length) { devBox.appendChild(h('p', { class: 'muted', text: '沒有符合的裝置' })); return; }
+          devBox.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'adm-table' },
+            h('tr', null, ['狀態', '帳號', '裝置', '登入時間', '最後使用', ''].map(t => h('th', { text: t }))),
+            shown.map(d => {
+              const [dot, lab] = state(d.ms);
+              const who = h('td', null, h('b', { text: d.name || d.id }), ` （${d.id}）`, d.status !== '啟用' ? h('span', { class: 'adm-tag', text: d.status }) : null);
+              const act = d.self ? h('small', { class: 'muted', text: '這台裝置' }) : h('button', { class: 'btn-small', text: '踢除', onclick: async e => {
+                if (!confirm(`踢除「${d.name || d.id}」（${d.id}）的這台裝置？\n${d.device}\n\n那台裝置下次進入遊戲頁或重新整理時，就會被要求重新登入。`)) return;
+                e.target.disabled = true;
+                try { await auth.adminKick(d.hash); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
+              } });
+              return h('tr', { class: d.ms > RECENT ? 'idle' : '' }, h('td', { text: `${dot} ${lab}` }), who, h('td', { class: 'dev', text: d.device || '—' }),
+                h('td', { text: when(d.login) }), h('td', { title: when(d.last), text: isFinite(d.ms) ? ago(d.ms) : '—' }), h('td', null, act));
+            }))));
+        }
+        const box = h('div', { class: 'panel' },
+          h('h3', { text: '🛠 管理', style: { marginTop: 0 } }),
+          h('div', { class: 'row' }, refreshBtn, h('label', null, onlyActive, ' 只看使用中'), filter),
+          info, pendBox, devBox,
+          h('small', { class: 'muted', text: '使用中＝5 分鐘內有操作；剛離開＝30 分鐘內。「最後使用」在玩家操作網站時每分鐘最多更新一次。面板打開時每分鐘自動重新整理。' }));
+        box.open = () => {
+          load();
+          if (!timer) timer = setInterval(() => { if (!box.hidden && document.visibilityState === 'visible') load(); }, 60e3);
+        };
+        return box;
       }
 
       // 帳號設定：改名稱、ID、密碼（都要先輸入目前密碼）
