@@ -4,31 +4,126 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>🃏 KS 牌桌模擬器</title>
+  <title>🃏 牌桌模擬器</title>
   <link rel="stylesheet" href="ks-common.css" />
   <style>
-    .wrap { max-width: 980px; margin: 0 auto; }
-    .login { max-width: 380px; margin: 40px auto; }
-    .login input { width: 100%; margin: 6px 0 12px; }
-    .games { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
-    .game { display: block; text-decoration: none; color: inherit; background: #fff; border-radius: 12px; padding: 18px; box-shadow: 0 1px 4px rgba(0, 0, 0, .08); border: 2px solid transparent; transition: border-color .15s, transform .1s; }
-    .game:hover { border-color: var(--accent); transform: translateY(-2px); }
-    .game .icon { font-size: 34px; }
-    .game h3 { margin: 6px 0; }
-    .game small { display: block; }
-    .acc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 18px; }
-    .acc-field { display: grid; gap: 4px; }
-    .acc-field input { width: 100%; }
-    .acc-field label { font-weight: 600; }
-    .login h3 { margin: 0 0 8px; }
-    .login-links { display: flex; justify-content: space-between; margin: 10px 0 6px; }
-    .login-links a { color: var(--accent); text-decoration: none; }
-    .login-links a:hover { text-decoration: underline; }
-    .adm-sum { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 0 10px; }
-    .adm-table td { vertical-align: middle; }
-    .adm-table td.dev { max-width: 260px; word-break: break-all; }
-    .adm-table tr.idle td { color: var(--muted); }
-    .adm-tag { display: inline-block; font-size: 12px; padding: 0 6px; border-radius: 6px; background: #fde8e8; color: var(--bad); margin-left: 4px; }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+    }
+
+    .login {
+      max-width: 380px;
+      margin: 40px auto;
+    }
+
+    .login input {
+      width: 100%;
+      margin: 6px 0 12px;
+    }
+
+    .games {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 14px;
+    }
+
+    .game {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: #fff;
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .08);
+      border: 2px solid transparent;
+      transition: border-color .15s, transform .1s;
+    }
+
+    .game:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+
+    .game .icon {
+      font-size: 34px;
+    }
+
+    .game h3 {
+      margin: 6px 0;
+    }
+
+    .game small {
+      display: block;
+    }
+
+    .acc-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 12px 18px;
+    }
+
+    .acc-field {
+      display: grid;
+      gap: 4px;
+    }
+
+    .acc-field input {
+      width: 100%;
+    }
+
+    .acc-field label {
+      font-weight: 600;
+    }
+
+    .login h3 {
+      margin: 0 0 8px;
+    }
+
+    .login-links {
+      display: flex;
+      justify-content: space-between;
+      margin: 10px 0 6px;
+    }
+
+    .login-links a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .login-links a:hover {
+      text-decoration: underline;
+    }
+
+    .adm-sum {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      margin: 6px 0 10px;
+    }
+
+    .adm-table td {
+      vertical-align: middle;
+    }
+
+    .adm-table td.dev {
+      max-width: 260px;
+      word-break: break-all;
+    }
+
+    .adm-table tr.idle td {
+      color: var(--muted);
+    }
+
+    .adm-tag {
+      display: inline-block;
+      font-size: 12px;
+      padding: 0 6px;
+      border-radius: 6px;
+      background: #fde8e8;
+      color: var(--bad);
+      margin-left: 4px;
+    }
   </style>
 </head>
 
@@ -56,7 +151,7 @@
       // 登入畫面共用外框
       function loginShell(title, ...kids) {
         app.innerHTML = '';
-        app.appendChild(h('div', { class: 'panel login' }, h('h1', { text: '🃏 KS 牌桌模擬器' }), title ? h('h3', { text: title }) : null, ...kids));
+        app.appendChild(h('div', { class: 'panel login' }, h('h1', { text: '🃏 牌桌模擬器' }), title ? h('h3', { text: title }) : null, ...kids));
       }
       const field = (label, input) => [h('label', { text: label, for: input.id, style: { display: 'block' } }), input];
       const links = (...items) => h('div', { class: 'login-links' }, ...items.map(([t, fn]) => h('a', { href: '#', text: t, onclick: e => { e.preventDefault(); fn(); } })));
@@ -167,7 +262,7 @@
 
       function renderMenu() {
         app.innerHTML = '';
-        app.appendChild(h('h1', { text: '🃏 KS 牌桌模擬器' }));
+        app.appendChild(h('h1', { text: '🃏 牌桌模擬器' }));
         const bar = h('div', { class: 'topbar' });
         let account = null, admin = null;
         if (!auth.enabled()) bar.appendChild(h('span', { class: 'muted', text: '本機模式：ks-config.js 尚未設定 apiUrl，不需登入，策略只存在這台電腦。' }));
@@ -235,11 +330,13 @@
           else pendBox.appendChild(h('div', { class: 'table-wrap' }, h('table', { class: 'adm-table' },
             h('tr', null, h('th', { text: 'ID' }), h('th', { text: '名稱' }), h('th', { text: '' })),
             data.pending.map(p => h('tr', null, h('td', { text: p.id }), h('td', { text: p.name || '—' }), h('td', null,
-              h('button', { class: 'btn-small', text: '✔ 開通', onclick: async e => {
-                if (!confirm(`開通帳號「${p.name || p.id}」（${p.id}）？開通後就可以登入。`)) return;
-                e.target.disabled = true;
-                try { await auth.adminApprove(p.id); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
-              } })))))));
+              h('button', {
+                class: 'btn-small', text: '✔ 開通', onclick: async e => {
+                  if (!confirm(`開通帳號「${p.name || p.id}」（${p.id}）？開通後就可以登入。`)) return;
+                  e.target.disabled = true;
+                  try { await auth.adminApprove(p.id); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
+                }
+              })))))));
           // 登入裝置
           const q = filter.value.trim().toLowerCase();
           const shown = devs.filter(d => (!onlyActive.checked || d.ms <= ACTIVE) && (!q || [d.id, d.name, d.device].some(x => String(x).toLowerCase().includes(q))));
@@ -251,11 +348,13 @@
             shown.map(d => {
               const [dot, lab] = state(d.ms);
               const who = h('td', null, h('b', { text: d.name || d.id }), ` （${d.id}）`, d.status !== '啟用' ? h('span', { class: 'adm-tag', text: d.status }) : null);
-              const act = d.self ? h('small', { class: 'muted', text: '這台裝置' }) : h('button', { class: 'btn-small', text: '踢除', onclick: async e => {
-                if (!confirm(`踢除「${d.name || d.id}」（${d.id}）的這台裝置？\n${d.device}\n\n那台裝置下次進入遊戲頁或重新整理時，就會被要求重新登入。`)) return;
-                e.target.disabled = true;
-                try { await auth.adminKick(d.hash); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
-              } });
+              const act = d.self ? h('small', { class: 'muted', text: '這台裝置' }) : h('button', {
+                class: 'btn-small', text: '踢除', onclick: async e => {
+                  if (!confirm(`踢除「${d.name || d.id}」（${d.id}）的這台裝置？\n${d.device}\n\n那台裝置下次進入遊戲頁或重新整理時，就會被要求重新登入。`)) return;
+                  e.target.disabled = true;
+                  try { await auth.adminKick(d.hash); await load(); } catch (err) { alert(err.message); e.target.disabled = false; }
+                }
+              });
               return h('tr', { class: d.ms > RECENT ? 'idle' : '' }, h('td', { text: `${dot} ${lab}` }), who, h('td', { class: 'dev', text: d.device || '—' }),
                 h('td', { text: when(d.login) }), h('td', { title: when(d.last), text: isFinite(d.ms) ? ago(d.ms) : '—' }), h('td', null, act));
             }))));
@@ -281,31 +380,33 @@
         const pw2 = h('input', { type: 'password', id: 'acc-pw2', autocomplete: 'new-password', placeholder: '再輸入一次新密碼' });
         const cur = h('input', { type: 'password', id: 'acc-cur', autocomplete: 'current-password' });
         const msg = h('div');
-        const save = h('button', { class: 'btn-good', text: '💾 儲存帳號設定', onclick: async () => {
-          const changes = {};
-          if (name.value.trim() !== auth.user.name) changes.newName = name.value.trim();
-          if (id.value.trim() !== auth.user.id) changes.newId = id.value.trim();
-          if (pw1.value || pw2.value) {
-            if (pw1.value !== pw2.value) { msg.innerHTML = '<div class="alert">兩次輸入的新密碼不一樣</div>'; return; }
-            if (pw1.value.length < auth.MIN_PW) { msg.innerHTML = '<div class="alert">新密碼至少要 ' + auth.MIN_PW + ' 個字</div>'; return; }
-            changes.newPw = pw1.value;
+        const save = h('button', {
+          class: 'btn-good', text: '💾 儲存帳號設定', onclick: async () => {
+            const changes = {};
+            if (name.value.trim() !== auth.user.name) changes.newName = name.value.trim();
+            if (id.value.trim() !== auth.user.id) changes.newId = id.value.trim();
+            if (pw1.value || pw2.value) {
+              if (pw1.value !== pw2.value) { msg.innerHTML = '<div class="alert">兩次輸入的新密碼不一樣</div>'; return; }
+              if (pw1.value.length < auth.MIN_PW) { msg.innerHTML = '<div class="alert">新密碼至少要 ' + auth.MIN_PW + ' 個字</div>'; return; }
+              changes.newPw = pw1.value;
+            }
+            if (!Object.keys(changes).length) { msg.innerHTML = '<div class="alert">沒有任何修改</div>'; return; }
+            if (!cur.value) { msg.innerHTML = '<div class="alert">請輸入目前的密碼</div>'; cur.focus(); return; }
+            if (changes.newId && !confirm(`確定把 ID 從「${auth.user.id}」改成「${changes.newId}」？\n你的策略、練習成績、登入裝置、玩家設定都會一起改到新 ID，之後要用新 ID 登入。`)) return;
+            save.disabled = true; msg.innerHTML = '<p class="muted">儲存中…</p>';
+            try {
+              const res = await auth.updateAccount(cur.value, changes);
+              const done = [changes.newName ? '名稱' : '', changes.newId ? `ID（共更新 ${res.moved} 筆相關資料）` : '', changes.newPw ? '密碼' : ''].filter(Boolean).join('、');
+              renderMenu();
+              const box = app.querySelector('.acc-panel');
+              box.hidden = false;
+              box.querySelector('.acc-msg').innerHTML = `<div class="okbox">✔ 已更新：${ui.esc(done)}${changes.newId ? '。下次請用新 ID「' + ui.esc(res.id) + '」登入' : ''}</div>`;
+            } catch (e) {
+              msg.innerHTML = `<div class="alert">${ui.esc(e.message)}</div>`;
+              save.disabled = false;
+            }
           }
-          if (!Object.keys(changes).length) { msg.innerHTML = '<div class="alert">沒有任何修改</div>'; return; }
-          if (!cur.value) { msg.innerHTML = '<div class="alert">請輸入目前的密碼</div>'; cur.focus(); return; }
-          if (changes.newId && !confirm(`確定把 ID 從「${auth.user.id}」改成「${changes.newId}」？\n你的策略、練習成績、登入裝置、玩家設定都會一起改到新 ID，之後要用新 ID 登入。`)) return;
-          save.disabled = true; msg.innerHTML = '<p class="muted">儲存中…</p>';
-          try {
-            const res = await auth.updateAccount(cur.value, changes);
-            const done = [changes.newName ? '名稱' : '', changes.newId ? `ID（共更新 ${res.moved} 筆相關資料）` : '', changes.newPw ? '密碼' : ''].filter(Boolean).join('、');
-            renderMenu();
-            const box = app.querySelector('.acc-panel');
-            box.hidden = false;
-            box.querySelector('.acc-msg').innerHTML = `<div class="okbox">✔ 已更新：${ui.esc(done)}${changes.newId ? '。下次請用新 ID「' + ui.esc(res.id) + '」登入' : ''}</div>`;
-          } catch (e) {
-            msg.innerHTML = `<div class="alert">${ui.esc(e.message)}</div>`;
-            save.disabled = false;
-          }
-        } });
+        });
         msg.className = 'acc-msg';
         return h('div', { class: 'panel acc-panel' },
           h('h3', { text: '⚙️ 帳號設定', style: { marginTop: 0 } }),
@@ -321,7 +422,7 @@
       function renderError(message) {
         app.innerHTML = '';
         app.appendChild(h('div', { class: 'panel login' },
-          h('h1', { text: '🃏 KS 牌桌模擬器' }),
+          h('h1', { text: '🃏 牌桌模擬器' }),
           h('div', { class: 'alert', text: message }),
           h('button', { text: '重試', onclick: boot })));
       }
