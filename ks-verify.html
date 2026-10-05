@@ -114,7 +114,7 @@
         const e = BJ.evaluate(cards, upRank, c10, R, L, { D: opt.D, fromAA: opt.pv === 11 });
         const out = {};
         ['stand', 'hit', 'double', 'split', 'surrender'].forEach(k => {
-          if (e[k]) out[k] = { ev: e[k].ev, win: e[k].w / Math.max(1e-9, e[k].w + e[k].p + e[k].l) };
+          if (e[k]) out[k] = { ev: e[k].ev, win: e[k].w / Math.max(1e-9, e[k].w + e[k].l) }; // 勝率不含和局：跟模擬、跟網站其他統計表同一個定義
         });
         if (out.surrender) {
           // 投降後莊家如果繼續補牌的結果（精算）：牌收回牌靴的規則下，玩家的牌會回到牌靴，莊家抽牌的組成就只少了明牌
@@ -556,7 +556,7 @@
         stopBtn.addEventListener('click', () => { stopReq = true; });
         const box = h('div', { class: 'panel sim-bar' },
           h('h3', { text: '🎲 模擬驗算', style: { marginTop: 0 } }),
-          h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '對選定範圍內每一格的每一個合法動作，各自真正玩 N 局：強制第一個動作，之後照目前規則下的最佳基本策略打到底，統計實際的勝率/EV，跟下面的精算數字對照。投降固定輸半注，改成統計投降後莊家如果繼續補牌的爆牌率。差距明顯（紅字）代表局數不夠多，或精算/模擬其中一處可能有問題。' }),
+          h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '對選定範圍內每一格的每一個合法動作，各自真正玩 N 局：強制第一個動作，之後照目前規則下的最佳基本策略打到底，統計實際的勝率/EV，跟下面的精算數字對照。投降固定輸半注，改成統計投降後莊家如果繼續補牌的爆牌率。紅字＝模擬跟精算的勝率或 EV 差超過 1 個百分點。局數少（例如 1 萬局以下）時可能只是運氣；局數夠多（例如 100 萬局以上，誤差小於 0.1 個百分點）還是紅字，代表兩邊算法本身有差，點 🔍 看說明（例如分牌的精算沒有算再分牌）。' }),
           h('div', { class: 'row' }, h('label', null, '範圍　', modeSel), playerWrap, dealerWrap),
           selHint,
           h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), startBtn, stopBtn),
