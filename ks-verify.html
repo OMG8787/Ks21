@@ -219,14 +219,20 @@
       // 跑單一「格子 + 動作」：強制第一個動作，之後照最佳基本策略打到底（跟精算一樣的規則、牌組設定）
       // 每一局都用設定的牌組組成重新洗牌，牌況不會隨著跑的局數累積變化，才能跟精算（固定組成）互相對照
       const LOG_LIMIT = 50; // 每個「格子＋動作」最多留幾筆局紀錄給人工檢查
+      function newStats() {
+        return { rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
+          dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0, acc: new KSU.Acc(),
+          fW: 0, fL: 0, fP: 0 }; // fW/fL/fP：只算第一手的勝/和/負（分牌會變兩手，精算 BJ.evaluate() 的 split 勝率只取第一手，這裡要對齊才能互相對照）
+      }
       function simulateJob(R, baseCounts, opt, job, N, onChunk, shouldStop) {
         return new Promise(resolve => {
           const upRank = job.d === 11 ? 'A' : String(job.d);
           const shoe = new KSU.Shoe({ counts: baseCounts, penetration: 1 });
-          let wins = 0, pushes = 0, losses = 0, netSum = 0, i = 0;
+          const S = newStats();
+          let i = 0;
           const logs = [];
           function tick() {
-            if (shouldStop()) { resolve({ done: i, stopped: true, logs }); return; }
+            if (shouldStop()) { resolve({ done: i, stopped: true, logs, S }); return; }
             const t0 = Date.now();
             while (i < N && Date.now() - t0 < 25) {
               shoe.shuffle();
@@ -242,25 +248,85 @@
                 rd.act(L[a] ? a : 'stand');
               }
               rd.playDealer();
-              const net = rd.seats[0].net;
+              const seat = rd.seats[0];
               if (logs.length < LOG_LIMIT) {
                 logs.push({
                   dealer: rd.dealer.map(KSU.cardText), dealerOutcome: rd.dealerOutcome(),
-                  hands: rd.seats[0].hands.map(x => ({ cards: x.cards.map(KSU.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble, freeSplit: x.freeSplit })),
-                  net
+                  hands: seat.hands.map(x => ({ cards: x.cards.map(KSU.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble, freeSplit: x.freeSplit })),
+                  net: seat.net
                 });
               }
+              // 跟遊戲「模擬」頁同一套統計方式（Simulator.step()）
+              S.rounds++;
+              let wager = 0;
+              seat.hands.forEach(x => {
+                S.hands++;
+                wager += x.stake;
+                if (x.result === 'W') S.hW++; else if (x.result === 'L') S.hL++; else S.hP++;
+                if (x.isBJ) S.bj++;
+                if (x.bust) S.bust++;
+                if (x.surrendered) S.surrender++;
+                if (x.evenMoney) S.even++;
+                if (x.doubled) { if (x.freeDouble) { S.dblFree++; if (x.result === 'W') S.dblFreeW++; } else { S.dbl++; if (x.result === 'W') S.dblW++; } }
+                if (x.fromSplit) { S.splitHands++; if (x.result === 'W') S.splitW++; }
+              });
+              S.wagered += wager;
+              S.net += seat.net;
+              S.acc.add(seat.net / 1);
+              if (seat.result === 'W') S.rW++; else if (seat.result === 'L') S.rL++; else S.rP++;
+              const h0 = seat.hands[0].result;
+              if (h0 === 'W') S.fW++; else if (h0 === 'L') S.fL++; else S.fP++;
               shoe.endRound();
-              netSum += net;
-              if (net > 1e-9) wins++; else if (net < -1e-9) losses++; else pushes++;
               i++;
             }
-            onChunk(i, N, { win: wins / Math.max(1, i), ev: netSum / Math.max(1, i) });
-            if (i >= N) { resolve({ done: i, stopped: false, win: wins / N, ev: netSum / N, wins, pushes, losses, logs }); return; }
+            // 「勝率」跟精算對齊：分牌只看第一手（精算的 split 勝率本來就是這樣算的，兩手合算的話沒有單一定義）；其他動作整局只有一手，兩種算法結果一樣
+            const fWin = job.action === 'split' ? S.fW / Math.max(1, S.fW + S.fL) : S.rW / Math.max(1, S.rW + S.rL);
+            onChunk(i, N, { win: fWin, ev: S.acc.mean() });
+            if (i >= N) { resolve({ done: i, stopped: false, win: fWin, ev: S.acc.mean(), wins: S.rW, pushes: S.rP, losses: S.rL, logs, S }); return; }
             setTimeout(tick, 0);
           }
           tick();
         });
+      }
+      function fmtStatsTable(S, isSplit) {
+        const ci = S.acc.ci95();
+        const splitNote = isSplit ? `<br>分牌後是兩手：「勝/和/負(局)」是整局（兩手合計淨輸贏）的結果；上面格子裡跟精算對照的「勝率」則是只看第一手（精算 BJ.evaluate() 的分牌勝率本來就只算第一手，兩手合算沒有單一定義的勝率，所以這裡故意跟它對齊）。<br>⚠️ 分牌的「精算」EV 本身只模擬「分一次、不會再分牌」的情況（網站既有公式的已知簡化），如果這個對子在目前規則下還能再分（分出來的手又是對子、而且還沒到分牌上限），模擬的 EV 通常會比精算高，這是正常的，不是模擬算錯——這種情況下模擬结果比精算更準。` : '';
+        return `<div class="table-wrap"><table class="vt-table" style="margin-bottom:10px"><tr>
+          <th>勝/和/負(局)</th><th>勝率(不含和)</th><th>手數</th><th>手 勝/和/負</th><th>BJ</th><th>爆牌</th><th>投降</th>
+          <th>自費加倍(勝率)</th><th>免費加倍(勝率)</th><th>分牌手(勝率)</th><th>先收1倍</th><th>總下注</th><th>淨盈虧</th>
+          <th>每局EV(原注)</th><th>95%信賴區間</th><th>標準差</th><th>淨/總下注</th></tr>
+          <tr><td>${S.rW}/${S.rP}/${S.rL}</td><td>${ui.pct(S.rW, S.rW + S.rL)}</td><td>${S.hands}</td><td>${S.hW}/${S.hP}/${S.hL}</td>
+          <td>${ui.pct(S.bj, S.rounds)}</td><td>${ui.pct(S.bust, S.hands)}</td><td>${S.surrender}</td>
+          <td>${S.dbl} (${ui.pct(S.dblW, S.dbl, 1)})</td><td>${S.dblFree} (${ui.pct(S.dblFreeW, S.dblFree, 1)})</td>
+          <td>${S.splitHands} (${ui.pct(S.splitW, S.splitHands, 1)})</td><td>${S.even}</td>
+          <td>${ui.fmt(S.wagered)}</td><td>${ui.signed(S.net, 0)}</td>
+          <td>${(S.acc.mean() * 100).toFixed(2)}%</td><td>${(ci[0] * 100).toFixed(2)}% ~ ${(ci[1] * 100).toFixed(2)}%</td>
+          <td>${S.acc.sd().toFixed(3)}</td><td>${ui.pct(S.net, S.wagered, 3)}</td></tr></table></div>
+          <small class="muted">這是這個動作目前已經跑完的全部 ${S.rounds.toLocaleString()} 局統計（不是只算下面列出的前 ${LOG_LIMIT} 筆），欄位定義跟遊戲「模擬」頁的玩家統計表一樣。${splitNote}</small>`;
+      }
+      // 跟 ui.logViewer 一樣的篩選/翻頁，但最上面多一張整體統計表
+      function openSimDetail(title, S, rows, isSplit) {
+        const pageSize = 50;
+        let filter = '', page = 0;
+        const list = h('div', { class: 'log-list' });
+        const info = h('span', { class: 'muted' });
+        const body = h('div', null,
+          h('div', { html: fmtStatsTable(S, isSplit) }),
+          h('div', { class: 'row' },
+            h('input', { type: 'text', placeholder: `篩選關鍵字（例如：爆牌、BJ、分牌；只能篩前 ${LOG_LIMIT} 筆局紀錄）`, style: { flex: 1 }, oninput: e => { filter = e.target.value.trim(); page = 0; render(); } }),
+            h('button', { class: 'btn-ghost', text: '◀', onclick: () => { page = Math.max(0, page - 1); render(); } }),
+            info,
+            h('button', { class: 'btn-ghost', text: '▶', onclick: () => { page++; render(); } })),
+          list);
+        function render() {
+          const src = filter ? rows.filter(r => r.replace(/<[^>]+>/g, '').includes(filter)) : rows;
+          const pages = Math.max(1, Math.ceil(src.length / pageSize));
+          if (page >= pages) page = pages - 1;
+          list.innerHTML = src.slice(page * pageSize, (page + 1) * pageSize).join('') || '<p class="muted">沒有紀錄</p>';
+          info.textContent = ` 第 ${page + 1}/${pages} 頁（共 ${src.length} 筆） `;
+        }
+        render();
+        return ui.modal(title, body);
       }
 
       const RES_LABEL = { W: '勝', L: '負', P: '和' };
@@ -325,7 +391,7 @@
                   title: `看其中 ${r.logs.length} 筆實際模擬的局，檢查算得對不對`,
                   onclick: ev2 => {
                     ev2.preventDefault(); ev2.stopPropagation();
-                    ui.logViewer(`模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；這次模擬 勝率 ${pct(r.win)}/EV ${evPct(r.ev)}，共 ${N.toLocaleString()} 局，這裡只列前 ${r.logs.length} 筆）`, r.logs.map(fmtSimLog));
+                    openSimDetail(`模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；模擬 勝率 ${pct(r.win)}/EV ${evPct(r.ev)}，共 ${N.toLocaleString()} 局）`, r.S, r.logs.map(fmtSimLog), job.action === 'split');
                   }
                 }));
               }
