@@ -221,8 +221,7 @@
       const LOG_LIMIT = 50; // 每個「格子＋動作」最多留幾筆局紀錄給人工檢查
       function newStats() {
         return { rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
-          dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0, acc: new KSU.Acc(),
-          fW: 0, fL: 0, fP: 0 }; // fW/fL/fP：只算第一手的勝/和/負（分牌會變兩手，精算 BJ.evaluate() 的 split 勝率只取第一手，這裡要對齊才能互相對照）
+          dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0, acc: new KSU.Acc() };
       }
       function simulateJob(R, baseCounts, opt, job, N, onChunk, shouldStop) {
         return new Promise(resolve => {
@@ -274,15 +273,14 @@
               S.net += seat.net;
               S.acc.add(seat.net / 1);
               if (seat.result === 'W') S.rW++; else if (seat.result === 'L') S.rL++; else S.rP++;
-              const h0 = seat.hands[0].result;
-              if (h0 === 'W') S.fW++; else if (h0 === 'L') S.fL++; else S.fP++;
               shoe.endRound();
               i++;
             }
-            // 「勝率」跟精算對齊：分牌只看第一手（精算的 split 勝率本來就是這樣算的，兩手合算的話沒有單一定義）；其他動作整局只有一手，兩種算法結果一樣
-            const fWin = job.action === 'split' ? S.fW / Math.max(1, S.fW + S.fL) : S.rW / Math.max(1, S.rW + S.rL);
-            onChunk(i, N, { win: fWin, ev: S.acc.mean() });
-            if (i >= N) { resolve({ done: i, stopped: false, win: fWin, ev: S.acc.mean(), wins: S.rW, pushes: S.rP, losses: S.rL, logs, S }); return; }
+            // 勝率用「所有手」去算（分牌後是幾手就算幾手，不是只看第一手或整局合算）：
+            // 10 局都分牌 → 20 手，就拿這 20 手的勝/和/負去算勝率。沒分牌的動作本來就只有一手，跟整局算完全一樣。
+            const handWin = S.hW / Math.max(1, S.hW + S.hL);
+            onChunk(i, N, { win: handWin, ev: S.acc.mean() });
+            if (i >= N) { resolve({ done: i, stopped: false, win: handWin, ev: S.acc.mean(), wins: S.rW, pushes: S.rP, losses: S.rL, logs, S }); return; }
             setTimeout(tick, 0);
           }
           tick();
@@ -290,7 +288,7 @@
       }
       function fmtStatsTable(S, isSplit) {
         const ci = S.acc.ci95();
-        const splitNote = isSplit ? `<br>分牌後是兩手：「勝/和/負(局)」是整局（兩手合計淨輸贏）的結果；上面格子裡跟精算對照的「勝率」則是只看第一手（精算 BJ.evaluate() 的分牌勝率本來就只算第一手，兩手合算沒有單一定義的勝率，所以這裡故意跟它對齊）。<br>⚠️ 分牌的「精算」EV 本身只模擬「分一次、不會再分牌」的情況（網站既有公式的已知簡化），如果這個對子在目前規則下還能再分（分出來的手又是對子、而且還沒到分牌上限），模擬的 EV 通常會比精算高，這是正常的，不是模擬算錯——這種情況下模擬结果比精算更準。` : '';
+        const splitNote = isSplit ? `<br>分牌後是兩手（或更多）：「勝/和/負(局)」是整局（每局淨輸贏）的結果；上面格子裡跟精算對照的「勝率」是把所有手牌攤開一起算——例如 10 局都分牌變 20 手，就用這 20 手的勝/和/負去算，不是只看一局或一手。「手 勝/和/負」那欄就是這個數字的明細。<br>⚠️ 分牌的「精算」EV 本身只模擬「分一次、不會再分牌」的情況（網站既有公式的已知簡化），如果這個對子在目前規則下還能再分（分出來的手又是對子、而且還沒到分牌上限），模擬的 EV 通常會比精算高，這是正常的，不是模擬算錯——這種情況下模擬结果比精算更準。` : '';
         return `<div class="table-wrap"><table class="vt-table" style="margin-bottom:10px"><tr>
           <th>勝/和/負(局)</th><th>勝率(不含和)</th><th>手數</th><th>手 勝/和/負</th><th>BJ</th><th>爆牌</th><th>投降</th>
           <th>自費加倍(勝率)</th><th>免費加倍(勝率)</th><th>分牌手(勝率)</th><th>先收1倍</th><th>總下注</th><th>淨盈虧</th>
