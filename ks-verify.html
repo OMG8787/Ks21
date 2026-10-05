@@ -264,7 +264,8 @@
 
       /* ---------------- 平行計算：每一條「通道」是一個 Web Worker（獨立執行緒、各用一顆 CPU 核心） ----------------
        * JS 本身是單執行緒：只用 async／setTimeout 分成幾條，其實還是同一顆核心輪流跑，不會變快；
-       * 要用 Worker 才是真的同時算。瀏覽器不能開 Worker 時（例如直接用 file:// 開），改用主畫面單核心慢慢跑。 */
+       * 要用 Worker 才是真的同時算。預設用主畫面單核心（mainLane，原本的跑法，任何裝置都能跑）；
+       * 管理者這次選了多核心才開 Worker，開不起來（例如直接用 file:// 開）就退回單核心。 */
       const MAX_LANES = 16;
       const autoLanes = () => Math.max(1, Math.min(MAX_LANES, (navigator.hardwareConcurrency || 4) - 1));
       function workerLane() {
@@ -381,15 +382,18 @@
         const stopBtn = h('button', { class: 'btn-danger', text: '■ 停止', disabled: true });
         const progFill = h('div');
         const progWrap = h('div', { class: 'sim-progress' }, progFill);
-        const IDLE = '按「開始模擬驗算」會對選定範圍內每一格的每個動作各跑設定的局數（分給好幾條平行通道同時跑），隨時可以按「停止」，已經跑完的格子結果會留著。';
+        const IDLE = '按「開始模擬驗算」會對選定範圍內每一格的每個動作各跑設定的局數，隨時可以按「停止」，已經跑完的格子結果會留著。';
         const statusLine = h('div', { class: 'sim-status muted', text: IDLE });
         const jobCountLine = h('div', { class: 'muted' });
         let stopReq = false, lanes = [];
 
-        // 平行通道數
+        // 計算方式：預設單核心（原本的跑法）；管理者可以這次改用多核心（只列這台裝置撐得住的條數，不會記住，每次開頁面都回到單核心）
         const AUTO = autoLanes();
-        const lanesSel = h('select', null, [['auto', `自動（${AUTO} 條）`], ...[1, 2, 4, 8, 16].filter(n => n <= MAX_LANES).map(n => [String(n), n + ' 條'])].map(([v, t]) => h('option', { value: v, text: t })));
-        lanesSel.title = `這台電腦有 ${navigator.hardwareConcurrency || '?'} 個 CPU 邏輯核心；每條通道用一顆核心，自動＝核心數減 1（留一顆給畫面），最多 ${MAX_LANES} 條。`;
+        const laneOpts = [['1', '單核心（預設，任何裝置都能跑）']];
+        if (typeof Worker !== 'undefined') [2, 4, 8, 16].filter(n => n <= AUTO).forEach(n => laneOpts.push([String(n), `多核心 ${n} 條（約快 ${n} 倍內）`]));
+        const lanesSel = h('select', null, laneOpts.map(([v, t]) => h('option', { value: v, text: t })));
+        lanesSel.value = '1';
+        lanesSel.title = `這台裝置有 ${navigator.hardwareConcurrency || '?'} 個 CPU 邏輯核心；多核心每條用一顆核心，最多列到「核心數減 1」（留一顆給畫面）。手機或舊電腦建議用單核心，多核心跑起來裝置會比較熱、比較耗電。`;
 
         // 範圍選擇
         const CARD_OPTS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
@@ -549,16 +553,21 @@
           const R = Object.assign({}, BJ.PRESETS[lastCfg.game]);
           const baseCounts = baseComposition(lastCfg);
 
-          // 開通道：先試 Worker（真的多核心），不行就退回主畫面單核心
-          let want = lanesSel.value === 'auto' ? AUTO : +lanesSel.value;
-          let mode = 'worker', note = '';
+          // 預設單核心：跟原本一樣在主畫面慢慢跑，任何裝置都能用。
+          // 管理者這次選了多核心才開 Worker（每條一顆核心）；開不起來就退回單核心
+          let want = Math.max(1, +lanesSel.value || 1);
+          let mode = 'main', note = '';
           lanes = [];
-          try { for (let i = 0; i < want; i++) lanes.push(workerLane()); }
-          catch (e) {
-            lanes.forEach(l => l.stop());
-            lanes = [mainLane()]; mode = 'main'; want = 1;
-            note = '（這個瀏覽器／開啟方式不能開背景執行緒，改用單核心跑；請用網址 https://… 開這個頁面才能平行）';
+          if (want > 1) {
+            mode = 'worker';
+            try { for (let i = 0; i < want; i++) lanes.push(workerLane()); }
+            catch (e) {
+              lanes.forEach(l => l.stop());
+              lanes = []; mode = 'main'; want = 1;
+              note = '（這個裝置／開啟方式不能開多核心，已改用單核心跑）';
+            }
           }
+          if (mode === 'main') lanes = [mainLane()];
           const opt = mode === 'main' ? BJ.generateOptimalStrategy(R, baseCounts) : null;
 
           // 切工作：動作數比通道少的時候（例如只跑一格），把同一個動作的局數拆成幾段分給不同通道，最後合併
@@ -574,7 +583,7 @@
           });
           const totalRounds = N * jobs.length;
           const nSur = jobs.filter(j => j.action === 'surrender').length;
-          const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降，只模擬莊家補牌，很快），每個 ${N.toLocaleString()} 局；平行 ${lanes.length} 條通道${note}。`;
+          const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降，只模擬莊家補牌，很快），每個 ${N.toLocaleString()} 局；${lanes.length > 1 ? `多核心 ${lanes.length} 條同時跑` : `單核心`}${note}。`;
           jobCountLine.textContent = scopeLine;
           stopReq = false;
           lockInputs(true);
@@ -630,7 +639,7 @@
           const spent = fmtTime((Date.now() - t0) / 1000);
           if (failed) statusLine.textContent = `⚠️ 背景計算出錯，已停止：${failed.message}。已完成 ${jobsDone} / ${jobs.length} 個動作。`;
           else if (stopReq) statusLine.textContent = `已停止。已完成 ${jobsDone} / ${jobs.length} 個動作（花費 ${spent}）；還沒跑完的格子沒有寫入（局數不足，結果不穩定，不採用）。`;
-          else statusLine.textContent = `跑完了（範圍：${sel.label}）：${jobs.length} 個動作，每個 ${N.toLocaleString()} 局，平行 ${want} 條通道，共花費 ${spent}。`;
+          else statusLine.textContent = `跑完了（範圍：${sel.label}）：${jobs.length} 個動作，每個 ${N.toLocaleString()} 局，${want > 1 ? `多核心 ${want} 條` : `單核心`}，共花費 ${spent}。`;
         }
         function fmtTime(sec) {
           if (!isFinite(sec) || sec < 0) return '—';
@@ -647,7 +656,7 @@
           h('div', { class: 'row' }, h('label', null, '範圍　', modeSel), playerWrap, dealerWrap),
           pickWrap,
           selHint,
-          h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), h('label', null, '平行通道　', lanesSel), startBtn, stopBtn),
+          h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), h('label', null, '計算方式　', lanesSel), startBtn, stopBtn),
           progWrap, statusLine, jobCountLine);
         return { box, reset: () => { progFill.style.width = '0%'; statusLine.textContent = IDLE; jobCountLine.textContent = ''; refreshSel(); } };
       }
