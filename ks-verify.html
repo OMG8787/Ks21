@@ -39,7 +39,11 @@
     .sim-progress { height: 10px; background: #e3e8f1; border-radius: 6px; overflow: hidden; margin: 6px 0; }
     .sim-progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
     .sim-status { font-size: 13px; }
-    .pick-wrap { border: 1px solid #dfe5ee; border-radius: 8px; padding: 6px 10px; margin: 6px 0; max-height: 45vh; overflow-y: auto; }
+    .pick-wrap { border: 1px solid #dfe5ee; border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
+    .pick-head { display: flex; align-items: center; gap: 8px; }
+    .pick-summary { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .pick-toggle { flex: none; }
+    .pick-body { max-height: 40vh; overflow-y: auto; margin-top: 4px; }
     .pick-group { margin: 4px 0; }
     .pick-group > b { margin-right: 6px; }
     .pick-group > button { padding: 1px 8px; margin-right: 4px; }
@@ -414,7 +418,9 @@
         const savedRows = new Set(saved.rows || []);
         const savedDs = new Set(saved.ds || BJ.DEALER_VALS);
         const rowBoxes = [], dBoxes = [];
-        const pickLabel = (kind, key) => (kind === 'hard' ? '硬' + key : kind === 'soft' ? '軟' + (key - 11) + '（A,' + (key - 11) + '）' : '對子' + (key === 11 ? 'A' : key));
+        // 軟牌用總點數（A 算 11）：A,2＝軟13 … A,9＝軟20
+        const pickLabel = (kind, key) => (kind === 'hard' ? '硬' + key : kind === 'soft' ? '軟' + key + '（A,' + (key - 11) + '）' : '對子' + (key === 11 ? 'A' : key));
+        const pickShort = v => { const [kind, key] = v.split('-'); return pickLabel(kind, +key).replace(/（.*）/, ''); };
         function checkbox(list, value, text, checked) {
           const cb = h('input', { type: 'checkbox' });
           cb.checked = checked; cb.value = value;
@@ -435,11 +441,27 @@
         }
         const rowItems = kind => (kind === 'hard' ? HARD_ORDER.filter(k => k !== 21).slice().reverse() : kind === 'soft' ? SOFT_ORDER.filter(k => k !== 21).slice().reverse() : PAIR_VALS)
           .map(key => [`${kind}-${key}`, pickLabel(kind, key), savedRows.has(`${kind}-${key}`)]);
-        const pickWrap = h('div', { class: 'pick-wrap' },
+        // 勾選區可以收起來：收起時只剩一行摘要，不會擋住下面的表格
+        const pickBody = h('div', { class: 'pick-body' },
           groupRow('硬牌', rowBoxes, rowItems('hard')),
           groupRow('軟牌', rowBoxes, rowItems('soft')),
           groupRow('對子', rowBoxes, rowItems('pair')),
-          groupRow('莊家明牌', dBoxes, BJ.DEALER_VALS.map(d => [String(d), upLabelOf(d), savedDs.has(d)])));
+          groupRow('莊家明牌', dBoxes, BJ.DEALER_VALS.map(d => [String(d), upLabelOf(d), savedDs.has(d)])),
+          h('div', { style: { textAlign: 'right', marginTop: '4px' } }, h('button', { class: 'btn-small', text: '✔ 選好了，收起來', onclick: () => setPickOpen(false) })));
+        const pickToggle = h('button', { class: 'btn-small btn-ghost pick-toggle', onclick: () => setPickOpen(!pickOpen) });
+        const pickSummary = h('span', { class: 'pick-summary' });
+        const pickWrap = h('div', { class: 'pick-wrap' }, h('div', { class: 'pick-head' }, pickToggle, pickSummary), pickBody);
+        let pickOpen = true;
+        function setPickOpen(on) {
+          pickOpen = on;
+          pickBody.style.display = on ? '' : 'none';
+          pickToggle.textContent = on ? '▲ 收起勾選' : '▼ 展開勾選';
+        }
+        function refreshPickSummary() {
+          const p = pickState();
+          const names = p.rows.map(pickShort);
+          pickSummary.textContent = `已選 ${names.length ? (names.length > 10 ? names.slice(0, 10).join('、') + ` 等 ${names.length} 種` : names.join('、')) : '（還沒勾）'}；莊家 ${p.ds.length === BJ.DEALER_VALS.length ? '全部' : (p.ds.map(upLabelOf).join('、') || '（還沒勾）')}`;
+        }
         function pickState() {
           return { rows: rowBoxes.filter(cb => cb.checked).map(cb => cb.value), ds: dBoxes.filter(cb => cb.checked).map(cb => +cb.value) };
         }
@@ -452,7 +474,9 @@
           const m = modeSel.value;
           playerWrap.style.display = m === 'player' || m === 'both' ? '' : 'none';
           dealerWrap.style.display = m === 'dealer' || m === 'both' ? '' : 'none';
+          if (m === 'pick' && pickWrap.style.display === 'none') setPickOpen(true); // 剛切到勾選模式：先展開
           pickWrap.style.display = m === 'pick' ? '' : 'none';
+          refreshPickSummary();
           selHint.textContent = '';
           if ((m === 'player' || m === 'both') && lastCfg) {
             const c = classifyCards(c1Sel.value, c2Sel.value, BJ.PRESETS[lastCfg.game]);
@@ -481,7 +505,7 @@
             if (!p.rows.length) return { err: '請至少勾選一種玩家牌型。' };
             if (!p.ds.length) return { err: '請至少勾選一種莊家明牌。' };
             sel.rows = new Set(p.rows); sel.ds = new Set(p.ds);
-            const names = p.rows.map(v => { const [kind, key] = v.split('-'); return pickLabel(kind, +key).replace(/（.*）/, ''); });
+            const names = p.rows.map(pickShort);
             sel.label = `勾選 ${names.length > 8 ? names.slice(0, 8).join('、') + ` 等 ${names.length} 種` : names.join('、')}；莊家 ${p.ds.length === BJ.DEALER_VALS.length ? '全部' : p.ds.map(upLabelOf).join('、')}`;
             return sel;
           }
@@ -589,6 +613,7 @@
           const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降${others ? '' : '，只模擬莊家補牌，很快'}），每個 ${N.toLocaleString()} 局；牌桌 ${players} 人${others ? `（另外 ${others} 位玩家隨機發牌、照最佳策略打）` : '（只有自己）'}；${lanes.length > 1 ? `多核心 ${lanes.length} 條同時跑` : `單核心`}${note}。`;
           jobCountLine.textContent = scopeLine;
           stopReq = false;
+          if (sel.rows) setPickOpen(false); // 開始跑就收起勾選區，方便看表格
           lockInputs(true);
           const t0 = Date.now();
           let jobsDone = 0, roundsDone = 0, nextTask = 0, failed = null;
