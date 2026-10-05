@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ks-blackjack-ui.js — 21 點頁面 UI（美式 / 英式 / 麗星郵輪22點 共用）
+   ks-blackjack-ui.js — 21 點頁面 UI（美式 / 英式 / Free bet 21點 共用）
    分頁：模擬 / 逐牌遊戲 / 算牌練習 / 測驗 / 策略管理 / 規則與牌組
    ========================================================================== */
 (function () {
@@ -308,7 +308,7 @@
         METHOD_HELP.map(([k, what, span, ex]) => `<tr class="${k === m ? 'on' : ''}"><td>${k === m ? '👉 ' : ''}<b>${BJ.COMBO_METHODS[k]}</b></td><td>${what}</td><td>${span}</td><td>${ex}</td></tr>`).join('') +
         '</table></div><small class="muted">・「還在桌上」包含所有玩家的牌和莊家明牌；莊家暗牌翻開前不算；爆牌、投降、先領錢（BJ、先收 1 倍）已收回牌靴的牌不算。局中要牌後數字會變，同一手牌前後的決策可能套用不同條件。<br>' +
         '・TC／RC 用「規則與牌組」選的算牌系統（預設 Hi-Lo）；選 KO 這類非平衡系統時，TC 直接用 RC。<br>' +
-        '・每局洗牌（22 點預設）時 TC／RC 每局都從 0 開始，只反映本局的牌；這時用大牌／小牌張數較直觀。</small>';
+        '・每局洗牌（Free bet 21點預設）時 TC／RC 每局都從 0 開始，只反映本局的牌；這時用大牌／小牌張數較直觀。</small>';
     }
     const numOr = (x, def) => (x === null || x === undefined || x === '' || !isFinite(+x) ? def : +x);
     function rangeText(lo, hi, method) {
@@ -610,6 +610,7 @@
               combo: !!comboEntry(r.combo.value), baseStrategy: getStrat(r.strat.value), baseName: libEntry(r.strat.value).get().name
             })),
             boostSeq: S.boostSeq.slice(), ramp: BJ.parseRamp(S.ramp), dealerUp: dealerUp.value || null,
+            withSuits: !!(S.rules.freeSplit || S.rules.freeDouble), // Free bet 規則：要統計 free bet 次數與對子花色
             logLimit: Math.max(0, parseInt(logLimit.value, 10) || 0)
           };
           compare = cmpChk.checked && cfg.seats.some(x => x.combo);
@@ -641,13 +642,38 @@
       return api;
     }
 
+    // Free bet 特殊統計（點 🔍 才顯示，避免玩家統計表太長）
+    function showSpecialStats(s, i) {
+      const n = s.rounds;
+      const every = c => (c ? (n / c).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' 局' : '—');
+      const gapOf = k => Math.max(s.fbGap[k], n - s.fbLast[k]);
+      let fbRows = '';
+      for (let k = 0; k <= 7; k++) {
+        const c = s.fbDist[k];
+        const gap = !k ? '—' : c ? gapOf(k).toLocaleString() + ' 局' : '還沒出現過（已 ' + n.toLocaleString() + ' 局）';
+        fbRows += `<tr><td>${k === 0 ? '沒有 free bet' : 'free bet ' + k}</td><td>${c.toLocaleString()}</td><td>${ui.pct(c, n, 3)}</td><td>${k ? every(c) : '—'}</td><td>${gap}</td></tr>`;
+      }
+      const any = n - s.fbDist[0];
+      fbRows += `<tr class="diff-row"><td><b>至少 1 個</b></td><td>${any.toLocaleString()}</td><td>${ui.pct(any, n, 3)}</td><td>${every(any)}</td><td>${any ? Math.max(s.fbAnyGap, n - s.fbAnyLast).toLocaleString() + ' 局' : '—'}</td></tr>`;
+      const P = s.pairs;
+      const pr = (lab, c) => `<tr><td>${lab}</td><td>${c.toLocaleString()}</td><td>${ui.pct(c, n, 3)}</td><td>${ui.pct(c, P.total, 2)}</td><td>${every(c)}</td></tr>`;
+      const html = `<h4>Free bet 次數（每局 free bet 籌碼數：免費分牌每多一手 1 個、免費加倍每手 1 個，一局最多 7 個）</h4>
+        <div class="table-wrap"><table><tr><th>每局 free bet</th><th>局數</th><th>佔總局數</th><th>平均幾局出現一次</th><th>最長間隔（最多隔幾局才出現）</th></tr>${fbRows}</table></div>
+        <small class="muted">共 ${n.toLocaleString()} 局；free bet 籌碼共 ${(s.fbSplit + s.fbDouble).toLocaleString()} 個（免費分牌 ${s.fbSplit.toLocaleString()}、免費加倍 ${s.fbDouble.toLocaleString()}），平均每局 ${((s.fbSplit + s.fbDouble) / Math.max(1, n)).toFixed(3)} 個。最長間隔包含第一次出現前、以及最後一次出現後到現在的局數。</small>
+        <h4>起手對子（玩家前兩張同點數）</h4>
+        <div class="table-wrap"><table><tr><th>種類</th><th>次數</th><th>佔總局數</th><th>佔所有對子</th><th>平均幾局出現一次</th></tr>
+        ${pr('同花 A（A,A 同花色）', P.suitA)}${pr('同花（不含 A,A）', P.suit)}${pr('同色不同花', P.color)}${pr('不同色（不同花）', P.diff)}
+        <tr class="diff-row"><td><b>對子合計</b></td><td>${P.total.toLocaleString()}</td><td>${ui.pct(P.total, n, 3)}</td><td>100%</td><td>${every(P.total)}</td></tr></table></div>
+        <small class="muted">同色：黑桃♠梅花♣、或紅心♥方塊♦。10/J/Q/K 要同一種牌才算對子（10,J 不算）。</small>`;
+      ui.modal(`玩家${i + 1}：Free bet／對子 特殊統計`, html);
+    }
     function renderSim(out, sim, cfg, simB, cfgB) {
       out.innerHTML = '';
       const warn = sim.warnings.size ? `<div class="alert">${Array.from(sim.warnings).map(ui.esc).join('<br>')}</div>` : '';
       let t = `<div class="panel">${warn}<h3>玩家統計（${sim.round.toLocaleString()} 局）</h3><div class="table-wrap"><table><tr>
         <th>玩家</th><th>策略</th><th>勝/和/負(局)</th><th>勝率(不含和)</th><th>手數</th><th>手 勝/和/負</th><th>BJ</th><th>爆牌</th><th>投降</th>
         <th>自費加倍(勝率)</th><th>免費加倍(勝率)</th><th>分牌手(勝率)</th><th>先收1倍</th><th>總下注</th><th>淨盈虧</th>
-        <th>每局EV(原注)</th><th>95%信賴區間</th><th>標準差</th><th>淨/總下注</th><th>最大回撤</th></tr>`;
+        <th>每局EV(原注)</th><th>95%信賴區間</th><th>標準差</th><th>淨/總下注</th><th>最大回撤</th>${cfg.withSuits ? '<th>Free bet／對子</th>' : ''}</tr>`;
       sim.stats.forEach((s, i) => {
         const ci = s.acc.ci95();
         t += `<tr><td>玩家${i + 1}</td><td>${ui.esc(cfg.seats[i].stratName)}</td>
@@ -657,7 +683,7 @@
           <td>${s.splitHands} (${ui.pct(s.splitW, s.splitHands, 1)})</td><td>${s.even}</td>
           <td>${ui.fmt(s.wagered)}</td><td class="${clsNum(s.net)}">${ui.signed(s.net, 0)}</td>
           <td class="${clsNum(s.acc.mean())}">${evPct(s.acc.mean())}</td><td>${evPct(ci[0])} ~ ${evPct(ci[1])}</td>
-          <td>${s.acc.sd().toFixed(3)}</td><td>${ui.pct(s.net, s.wagered, 3)}</td><td>${ui.fmt(s.bank.maxDD)}</td></tr>`;
+          <td>${s.acc.sd().toFixed(3)}</td><td>${ui.pct(s.net, s.wagered, 3)}</td><td>${ui.fmt(s.bank.maxDD)}</td>${cfg.withSuits ? `<td><a href="#" class="fb-link" data-seat="${i}" title="Free bet 次數分佈、起手對子花色">🔍</a> 平均 ${((s.fbSplit + s.fbDouble) / Math.max(1, s.rounds)).toFixed(3)}</td>` : ''}</tr>`;
       });
       t += '</table></div><small class="muted">每局EV = 每局淨盈虧 ÷ 基本注。信賴區間跨過 0 表示局數還不足以判斷正負。</small></div>';
       if (simB) {
@@ -677,6 +703,7 @@
         if (vnotes.length) t += `</table></div><div class="hint">${vnotes.join('<br>')}</div><div><small class="muted">${cfg.shuffleEveryRound ? '每局洗牌：兩個版本每一局的起始牌序完全相同，差距只來自策略不同。' : '沒有每局洗牌：兩個版本起始牌序相同，但要牌張數不同後，後面的牌序會開始不同。'}差距是否可靠請看信賴區間：局數越多越準。</small></div>${vnotes.length ? '</div>' : ''}`;
       }
       out.insertAdjacentHTML('beforeend', t);
+      out.querySelectorAll('.fb-link').forEach(a => a.addEventListener('click', e => { e.preventDefault(); showSpecialStats(sim.stats[+a.dataset.seat], +a.dataset.seat); }));
 
       sim.stats.forEach((s, i) => {
         const tcRows = Object.keys(s.tc).map(Number).sort((a, b) => a - b).map(k => {
@@ -1503,7 +1530,7 @@
       pane.appendChild(gridBox);
 
       const LABEL = { H: 'H', S: 'S', Dh: 'D', Ds: 'Ds', Rh: 'R', Rs: 'Rs', P: 'P', D: 'D', R: 'R', '-': '·', Y: '收', N: '不收' };
-      // 22點：加倍格子標示免費（硬 9/10/11 兩張）或自費
+      // Free bet 21點：加倍格子標示免費（硬 9/10/11 兩張）或自費
       function cellLabel(kind, key, code) {
         const lab = LABEL[code] || code;
         if (!S.rules.freeDouble || code[0] !== 'D') return lab;

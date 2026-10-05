@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ks-blackjack.js — 21 點引擎（美式 / 英式 / 麗星郵輪22點 共用，規則物件驅動）
+   ks-blackjack.js — 21 點引擎（美式 / 英式 / Free bet 21點 共用，規則物件驅動）
    - Round：一局的狀態機（發牌 → 玩家逐手行動 → 莊家補牌一次 → 統一結算）
    - decide：依策略表（相容舊版 ks_rules.json）決定動作
    - EV：依剩餘牌組組成計算各動作 EV 與勝/和/輸機率
@@ -31,8 +31,8 @@
     splitAcesOneCard: true,     // AA 分牌後各一張，不能再要牌/加倍
     splitByValue: false,        // true：10/J/Q/K 同值即可分
     das: true,                  // 分牌後可加倍
-    freeDouble: false,          // 兩張硬 9/10/11 免費加倍（22點）
-    freeSplit: false,           // 分牌免費：分出來的手贏照賠、輸不扣錢（22點）
+    freeDouble: false,          // 兩張硬 9/10/11 免費加倍（Free bet 21點）
+    freeSplit: false,           // 分牌免費：分出來的手贏照賠、輸不扣錢（Free bet 21點）
     surrender: 'any2',          // 'any2' 任何未要牌的兩張 | 'first' 只限第一個動作 | 'none'
     surrenderAfterDouble: false,// 加倍後投降
     returnSettledCards: false,  // 爆牌、投降、先領錢的手牌立即收回牌靴洗牌
@@ -50,7 +50,7 @@
       surrender: 'any2', surrenderAfterDouble: true, defaultNo10: true, returnSettledCards: true
     }),
     star22: Object.assign({}, BASE_RULES, {
-      name: '麗星郵輪22點', dealerHitSoft17: true, evenMoney: true, bjVsDealerBJ: 'push',
+      name: 'Free bet 21點', dealerHitSoft17: true, evenMoney: true, bjVsDealerBJ: 'push',
       dealerBJOriginalOnly: true, dealer22Push: true, maxHands: 4, resplitAces: false,
       splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first', returnSettledCards: true,
       noSurrenderVsAce: true
@@ -965,7 +965,7 @@
     constructor(cfg) {
       this.cfg = cfg;
       this.R = cfg.rules;
-      this.shoe = new KS.Shoe({ counts: cfg.counts, penetration: cfg.penetration });
+      this.shoe = new KS.Shoe({ counts: cfg.counts, penetration: cfg.penetration, withSuits: !!cfg.withSuits }); // withSuits：要統計對子花色時才開
       this.counter = new KS.Counter(cfg.countSystem || 'hilo', this.shoe.total);
       this.shoe.onDraw = c => this.counter.see(c);
       this.shoe.onShuffle = () => this.counter.reset(this.shoe.total);
@@ -977,7 +977,11 @@
         rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
         dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, split: 0, splitHands: 0, splitW: 0, even: 0,
         wagered: 0, net: 0, acc: new KS.Acc(), bank: new KS.Bankroll(), streak: new KS.StreakTracker(10),
-        road: [], tc: {}, seg: {}, segUse: {}, maxBet: 0
+        road: [], tc: {}, seg: {}, segUse: {}, maxBet: 0,
+        // Free bet：每局幾個 free bet 籌碼（免費分牌每多一手 1 個、免費加倍每手 1 個，最多 3+4=7）
+        fbDist: new Array(8).fill(0), fbLast: new Array(8).fill(0), fbGap: new Array(8).fill(0), fbSplit: 0, fbDouble: 0, fbAnyLast: 0, fbAnyGap: 0,
+        // 起手對子（需要 withSuits）：同花A、同花、同色不同花、不同色
+        pairs: { total: 0, suitA: 0, suit: 0, color: 0, diff: 0 }
       }));
       this.dealerStats = { total: 0, played: 0 };
       OUTCOMES.forEach(k => { this.dealerStats[k] = 0; });
@@ -1007,6 +1011,7 @@
       const seats = cfg.seats.map((s, i) => ({ bet: this._betFor(i, tc), fixed: s.fixed || [] }));
       const rd = new Round({ rules: R, shoe: this.shoe }, seats, { dealerUp: cfg.dealerUp || null }).start();
       rd.warnings.forEach(w => this.warnings.add(w));
+      const initCards = rd.seats.map(s => s.hands[0].cards.slice(0, 2)); // 起手兩張（分牌後 hands[0] 會變）
       let guard = 0;
       while (rd.phase === 'player') {
         const c = rd.current();
@@ -1051,6 +1056,24 @@
           if (h.fromSplit) { S.splitHands++; if (h.result === 'W') S.splitW++; }
         });
         if (seat.hands.length > 1) S.split += seat.hands.length - 1;
+        // Free bet 次數分佈與最長間隔
+        let fb = 0;
+        seat.hands.forEach(h => { if (h.freeSplit) { fb++; S.fbSplit++; } if (h.freeDouble) { fb++; S.fbDouble++; } });
+        fb = Math.min(7, fb);
+        S.fbDist[fb]++;
+        if (fb > 0) {
+          S.fbGap[fb] = Math.max(S.fbGap[fb], S.rounds - S.fbLast[fb]); S.fbLast[fb] = S.rounds;
+          S.fbAnyGap = Math.max(S.fbAnyGap, S.rounds - S.fbAnyLast); S.fbAnyLast = S.rounds;
+        }
+        // 起手對子花色
+        const ic = initCards[i];
+        if (cfg.withSuits && ic.length === 2 && rankOf(ic[0]) === rankOf(ic[1])) {
+          const P = S.pairs, red = x => x.s === '♥' || x.s === '♦';
+          P.total++;
+          if (ic[0].s === ic[1].s) { if (rankOf(ic[0]) === 'A') P.suitA++; else P.suit++; }
+          else if (red(ic[0]) === red(ic[1])) P.color++;
+          else P.diff++;
+        }
         S.wagered += wager;
         S.net += seat.net;
         S.acc.add(seat.net / cfg.seats[i].bet);
