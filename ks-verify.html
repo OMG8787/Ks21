@@ -9,9 +9,12 @@
   <!--
     全策略試算（370 格驗算表）
     --------------------------------------------------------------------------
-    只是一個唯讀的計算器頁面：拿現有的 BJ.evaluate() / BJ.dealerDist()（跟「最佳基本策略」
-    用的是同一套、沒有改過的公式）去算出 370 種「玩家牌況 × 莊家明牌」組合，
-    每一種列出每個合法動作（分牌/要牌/停牌/加倍/投降）的勝率% 與籌碼%(EV)。
+    兩種算法並列對照：
+    1. 精算（即時）：拿現有的 BJ.evaluate() / BJ.dealerDist()（跟「最佳基本策略」用的是同一套、
+       沒有改過的公式）直接算出精確機率，瞬間完成。
+    2. 模擬驗算（可選、要跑很久）：對每一格的每一個合法動作，各自真正玩 N 局（N 可設定，
+       強制第一個動作，之後照最佳基本策略打到底），用實際模擬的結果去對照精算是否一致。
+       這是「驗算」的本意：兩種獨立算法互相印證。
     370 = 硬牌 4~21（18 種）+ 軟牌 13~21（9 種）+ 對子 A~10（10 種），各乘莊家 10 種。
     不會寫入資料庫，也不會影響任何現有頁面；只有管理者看得到（從首頁「🛠 管理」進來）。
   -->
@@ -24,8 +27,15 @@
     .vt-cell .act { display: inline-block; min-width: 30px; }
     .vt-cell .best { font-weight: 700; color: var(--accent); }
     .vt-cell .na { color: var(--muted); }
-    .vt-controls input[type=number] { width: 70px; }
+    .vt-cell .sim { display: block; font-size: 11px; color: var(--muted); }
+    .vt-cell .sim.diff { color: var(--bad); font-weight: 700; }
+    .vt-cell.running { outline: 2px solid var(--accent); }
+    .vt-controls input[type=number] { width: 90px; }
     .vt-controls .row { align-items: center; }
+    .sim-bar { position: sticky; top: 0; z-index: 5; }
+    .sim-progress { height: 10px; background: #e3e8f1; border-radius: 6px; overflow: hidden; margin: 6px 0; }
+    .sim-progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
+    .sim-status { font-size: 13px; }
   </style>
   <script src="ks-config.js"></script>
   <script src="ks-login-guard.js"></script>
@@ -41,13 +51,15 @@
       const KSU = KS, BJ = KSU.BJ, ui = KSU.ui, h = ui.h, auth = KSU.auth;
       const app = ui.$('app');
 
-      /* ---------------- 計算：代表牌型（跟 generateOptimalStrategy 用的是同一套代表組合，另外補了 21 點那一列） ---------------- */
+      /* ---------------- 代表牌型（跟 generateOptimalStrategy 用的是同一套代表組合，另外補了 21 點那一列） ---------------- */
       const HARD_REP = { 4: ['2', '2'], 5: ['2', '3'], 6: ['2', '4'], 7: ['2', '5'], 8: ['3', '5'], 9: ['4', '5'], 10: ['4', '6'], 11: ['5', '6'], 12: ['10', '2'], 13: ['10', '3'], 14: ['10', '4'], 15: ['10', '5'], 16: ['10', '6'], 17: ['10', '7'], 18: ['10', '8'], 19: ['10', '9'], 20: ['10', '10'], 21: ['10', '5', '6'] };
       const SOFT_REP = { 13: ['A', '2'], 14: ['A', '3'], 15: ['A', '4'], 16: ['A', '5'], 17: ['A', '6'], 18: ['A', '7'], 19: ['A', '8'], 20: ['A', '9'], 21: ['A', '2', '8'] };
       const PAIR_VALS = [11, 10, 9, 8, 7, 6, 5, 4, 3, 2]; // 11=A,A
       const pairRank = pv => (pv === 11 ? 'A' : String(pv));
       const pairRep = pv => [pairRank(pv), pairRank(pv)];
       const BIG = ['10', 'J', 'Q', 'K', 'A'], SMALL = ['2', '3', '4', '5', '6'];
+      const HARD_ORDER = Object.keys(HARD_REP).map(Number).sort((a, b) => b - a);
+      const SOFT_ORDER = Object.keys(SOFT_REP).map(Number).sort((a, b) => b - a);
 
       // 把「已出現 n 張」依序從指定的 5 個點數均分扣掉（扣到該點數沒牌就跳過），回傳剩餘的 13 點數張數表
       function depleted(full, ranks, n) {
@@ -68,7 +80,13 @@
         return c;
       }
 
-      // 算一個「玩家代表牌 × 莊家明牌」格子：回傳每個合法動作的 {ev, winPct}
+      function baseComposition(cfg) {
+        const full0 = fullCounts(cfg.decks);
+        const small = cfg.small > 0 ? depleted(full0, SMALL, cfg.small) : full0;
+        return cfg.big > 0 ? depleted(small, BIG, cfg.big) : small;
+      }
+
+      /* ---------------- 精算：BJ.evaluate() / BJ.dealerDist()，跟網站其他地方用的是同一套公式 ---------------- */
       function calcCell(R, counts10Base, cards, upRank, opt) {
         const c10 = counts10Base.slice();
         cards.forEach(r => { const i = KSU.idx10(r); if (c10[i] > 0) c10[i]--; });
@@ -98,9 +116,7 @@
 
       function runAll(cfg) {
         const R = Object.assign({}, BJ.PRESETS[cfg.game]);
-        const full0 = fullCounts(cfg.decks);
-        const small = cfg.small > 0 ? depleted(full0, SMALL, cfg.small) : full0;
-        const full = cfg.big > 0 ? depleted(small, BIG, cfg.big) : small;
+        const full = baseComposition(cfg);
         const rows = { hard: [], soft: [], pair: [] };
         BJ.DEALER_VALS.forEach(d => {
           const upRank = d === 11 ? 'A' : String(d);
@@ -108,11 +124,11 @@
           const ui0 = KSU.idx10(upRank);
           if (c10base[ui0] > 0) c10base[ui0]--;
           const D = BJ.dealerDist(ui0, c10base, R);
-          Object.keys(HARD_REP).map(Number).sort((a, b) => b - a).forEach(t => {
+          HARD_ORDER.forEach(t => {
             const cell = calcCell(R, c10base, HARD_REP[t].slice(), upRank, { D, isPair: false });
             (rows.hard[t] || (rows.hard[t] = {}))[d] = cell;
           });
-          Object.keys(SOFT_REP).map(Number).sort((a, b) => b - a).forEach(t => {
+          SOFT_ORDER.forEach(t => {
             const cell = calcCell(R, c10base, SOFT_REP[t].slice(), upRank, { D, isPair: false });
             (rows.soft[t] || (rows.soft[t] = {}))[d] = cell;
           });
@@ -124,22 +140,24 @@
         return rows;
       }
 
-      /* ---------------- 畫面 ---------------- */
+      /* ---------------- 畫面：精算表格 ---------------- */
       const ACT_LABEL = { hit: 'H', stand: 'S', double: 'D', split: 'P', surrender: 'R' };
+      const ACT_NAME = { hit: '要牌', stand: '停牌', double: '加倍', split: '分牌', surrender: '投降' };
       const pct = x => (x * 100).toFixed(1) + '%';
       const evPct = x => (x >= 0 ? '+' : '') + (x * 100).toFixed(1) + '%';
+      const jobKey = (kind, key, d, action) => `${kind}-${key}-${d}-${action}`;
 
-      function cellHtml(cell) {
+      function cellHtml(kind, key, cell) {
         if (!cell) return '<span class="na">—</span>';
         const order = ['stand', 'hit', 'double', 'split', 'surrender'];
         return order.filter(k => cell[k]).map(k => {
           const v = cell[k];
           const isBest = k === cell.best;
-          return `<span class="act${isBest ? ' best' : ''}" title="${k}：勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}</span>`;
+          return `<span class="act${isBest ? ' best' : ''}" data-cell="${kind}-${key}" data-act="${k}" title="${ACT_NAME[k]}：精算 勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}<span class="sim" data-sim="${jobKey(kind, key, 0, k)}"></span></span>`;
         }).join('<br>');
       }
 
-      function buildTable(title, order, rowsObj, labelFn) {
+      function buildTable(title, order, kind, rowsObj, labelFn) {
         const box = h('div', { class: 'panel' });
         box.appendChild(h('h3', { text: title, style: { marginTop: 0 } }));
         const tbl = h('table', { class: 'vt-table' });
@@ -148,8 +166,8 @@
         order.forEach(key => {
           const tr = h('tr', null, h('td', { class: 'hand', text: labelFn(key) }));
           BJ.DEALER_VALS.forEach(d => {
-            const td = h('td', { class: 'vt-cell' });
-            td.innerHTML = cellHtml(rowsObj[key] && rowsObj[key][d]);
+            const td = h('td', { class: 'vt-cell', id: `td-${kind}-${key}-${d}` });
+            td.innerHTML = cellHtml(kind, key, rowsObj[key] && rowsObj[key][d]).replace(/data-sim="([a-z]+-[0-9]+)-0-/g, `data-sim="$1-${d}-`);
             tr.appendChild(td);
           });
           tbl.appendChild(tr);
@@ -158,17 +176,155 @@
         return box;
       }
 
+      let lastRows = null, lastCfg = null;
       function render(cfg) {
         const t0 = performance.now();
         const rows = runAll(cfg);
         const ms = (performance.now() - t0).toFixed(0);
+        lastRows = rows; lastCfg = cfg;
         const out = ui.$('result');
         out.innerHTML = '';
-        out.appendChild(h('p', { class: 'muted', text: `計算 370 格耗時 ${ms} 毫秒。每格依序列出合法動作：勝率%／每注EV%（不含和局計入分母的勝率；EV 以原始下注 1 注為基準，加倍時反映 2 倍注的輸贏）。藍色粗體＝這一格 EV 最高的動作。` }));
-        out.appendChild(buildTable('硬牌（18 種 × 莊家 10 種 = 180 格）', Object.keys(HARD_REP).map(Number).sort((a, b) => b - a), rows.hard, t => '硬 ' + t));
-        out.appendChild(buildTable('軟牌（9 種 × 莊家 10 種 = 90 格）', Object.keys(SOFT_REP).map(Number).sort((a, b) => b - a), rows.soft, t => 'A,' + (t - 11)));
-        out.appendChild(buildTable('對子（10 種 × 莊家 10 種 = 100 格）', PAIR_VALS, rows.pair, pv => (pv === 11 ? 'A,A' : pv + ',' + pv)));
+        out.appendChild(h('p', { class: 'muted', text: `精算 370 格耗時 ${ms} 毫秒。每格依序列出合法動作：勝率%／每注EV%（不含和局計入分母的勝率；EV 以原始下注 1 注為基準，加倍時反映 2 倍注的輸贏）。藍色粗體＝這一格精算 EV 最高的動作。灰色小字是模擬驗算結果（要按下面「開始模擬驗算」才會出現）。` }));
+        out.appendChild(buildTable('硬牌（18 種 × 莊家 10 種 = 180 格）', HARD_ORDER, 'hard', rows.hard, t => '硬 ' + t));
+        out.appendChild(buildTable('軟牌（9 種 × 莊家 10 種 = 90 格）', SOFT_ORDER, 'soft', rows.soft, t => 'A,' + (t - 11)));
+        out.appendChild(buildTable('對子（10 種 × 莊家 10 種 = 100 格）', PAIR_VALS, 'pair', rows.pair, pv => (pv === 11 ? 'A,A' : pv + ',' + pv)));
+        simUI.reset();
       }
+
+      /* ---------------- 模擬驗算引擎 ---------------- */
+      // 建立代表牌的 fixed 陣列：硬21／軟21 是 3 張代表組合，沒辦法用 Round 的 fixed（只支援前兩張），略過模擬（只有停牌一種動作，精算已經是封閉公式，不需要驗算）
+      function buildJobs(cfg, rows) {
+        const jobs = [];
+        HARD_ORDER.forEach(key => {
+          if (key === 21) return;
+          BJ.DEALER_VALS.forEach(d => Object.keys(rows.hard[key][d]).forEach(action => {
+            if (action !== 'best' && rows.hard[key][d][action]) jobs.push({ kind: 'hard', key, d, action, cards: HARD_REP[key] });
+          }));
+        });
+        SOFT_ORDER.forEach(key => {
+          if (key === 21) return;
+          BJ.DEALER_VALS.forEach(d => Object.keys(rows.soft[key][d]).forEach(action => {
+            if (action !== 'best' && rows.soft[key][d][action]) jobs.push({ kind: 'soft', key, d, action, cards: SOFT_REP[key] });
+          }));
+        });
+        PAIR_VALS.forEach(pv => {
+          BJ.DEALER_VALS.forEach(d => Object.keys(rows.pair[pv][d]).forEach(action => {
+            if (action !== 'best' && rows.pair[pv][d][action]) jobs.push({ kind: 'pair', key: pv, d, action, cards: pairRep(pv) });
+          }));
+        });
+        return jobs;
+      }
+
+      // 跑單一「格子 + 動作」：強制第一個動作，之後照最佳基本策略打到底（跟精算一樣的規則、牌組設定）
+      // 每一局都用設定的牌組組成重新洗牌，牌況不會隨著跑的局數累積變化，才能跟精算（固定組成）互相對照
+      function simulateJob(R, baseCounts, opt, job, N, onChunk, shouldStop) {
+        return new Promise(resolve => {
+          const upRank = job.d === 11 ? 'A' : String(job.d);
+          const shoe = new KSU.Shoe({ counts: baseCounts, penetration: 1 });
+          let wins = 0, pushes = 0, losses = 0, netSum = 0, i = 0;
+          function tick() {
+            if (shouldStop()) { resolve({ done: i, stopped: true }); return; }
+            const t0 = Date.now();
+            while (i < N && Date.now() - t0 < 25) {
+              shoe.shuffle();
+              const rd = new BJ.Round({ rules: R, shoe: shoe }, [{ bet: 1, fixed: job.cards }], { dealerUp: upRank }).start();
+              let first = true;
+              let guard = 0;
+              while (rd.phase === 'player' && guard++ < 50) {
+                const c = rd.current();
+                const L = rd.legal(c.hand, c.seat);
+                let a;
+                if (first) { a = L[job.action] ? job.action : 'stand'; first = false; }
+                else a = BJ.decide(opt, c.hand, rd.dealer[0], L, {});
+                rd.act(L[a] ? a : 'stand');
+              }
+              rd.playDealer();
+              shoe.endRound();
+              const net = rd.seats[0].net;
+              netSum += net;
+              if (net > 1e-9) wins++; else if (net < -1e-9) losses++; else pushes++;
+              i++;
+            }
+            onChunk(i, N, { win: wins / Math.max(1, i), ev: netSum / Math.max(1, i) });
+            if (i >= N) { resolve({ done: i, stopped: false, win: wins / N, ev: netSum / N, wins, pushes, losses }); return; }
+            setTimeout(tick, 0);
+          }
+          tick();
+        });
+      }
+
+      function buildSimController() {
+        const roundsInput = h('input', { type: 'number', min: 1000, step: 1000, value: 10000000, style: { width: '130px' } });
+        const startBtn = h('button', { class: 'btn-good', text: '▶ 開始模擬驗算' });
+        const stopBtn = h('button', { class: 'btn-danger', text: '■ 停止', disabled: true });
+        const progFill = h('div');
+        const progWrap = h('div', { class: 'sim-progress' }, progFill);
+        const statusLine = h('div', { class: 'sim-status muted', text: '按「開始模擬驗算」會依序對每一格的每個動作各跑設定的局數，可能要跑很久，隨時可以按「停止」，已經跑完的格子結果會留著。' });
+        const jobCountLine = h('div', { class: 'muted' });
+        let stopReq = false, running = false;
+
+        async function start() {
+          if (!lastRows || !lastCfg) return;
+          const N = Math.max(1000, Math.floor(+roundsInput.value) || 10000000);
+          const jobs = buildJobs(lastCfg, lastRows);
+          const R = Object.assign({}, BJ.PRESETS[lastCfg.game]);
+          const baseCounts = baseComposition(lastCfg);
+          const opt = BJ.generateOptimalStrategy(R, baseCounts);
+          jobCountLine.textContent = `共 ${jobs.length} 個「格子＋動作」要跑，每個 ${N.toLocaleString()} 局（硬21／軟21 因為代表牌型是3張、只有停牌一種合法動作，精算已是封閉公式，不需要模擬）。`;
+          stopReq = false; running = true;
+          startBtn.disabled = true; stopBtn.disabled = false; roundsInput.disabled = true;
+          const t0 = Date.now();
+          let jobsDone = 0;
+          for (const job of jobs) {
+            const upLabel = job.d === 11 ? 'A' : job.d;
+            const handLabel = job.kind === 'hard' ? '硬 ' + job.key : job.kind === 'soft' ? 'A,' + (job.key - 11) : (job.key === 11 ? 'A,A' : job.key + ',' + job.key);
+            const td = ui.$(`td-${job.kind}-${job.key}-${job.d}`);
+            if (td) td.classList.add('running');
+            const simSpan = document.querySelector(`[data-sim="${jobKey(job.kind, job.key, job.d, job.action)}"]`);
+            const r = await simulateJob(R, baseCounts, opt, job, N, (done, total, running) => {
+              const elapsed = (Date.now() - t0) / 1000;
+              statusLine.textContent = `[玩家：${handLabel}，莊家 ${upLabel}] ${ACT_NAME[job.action]}　${done.toLocaleString()} / ${total.toLocaleString()}　（目前這格暫估 勝率 ${pct(running.win)}／EV ${evPct(running.ev)}）`;
+              progFill.style.width = (done / total * 100) + '%';
+              const speed = done / Math.max(0.5, elapsed - (jobsDone ? 0 : 0));
+            }, () => stopReq);
+            if (td) td.classList.remove('running');
+            if (r.stopped) {
+              statusLine.textContent = `已停止。這一格（${handLabel} vs ${upLabel}，${ACT_NAME[job.action]}）跑到 ${r.done.toLocaleString()} / ${N.toLocaleString()} 局，沒有寫入（局數不足，結果不穩定，不採用）。已完成 ${jobsDone} / ${jobs.length} 個動作。`;
+              break;
+            }
+            if (simSpan) {
+              const exact = lastRows[job.kind][job.key][job.d][job.action];
+              const diff = Math.abs(r.ev - exact.ev) > 0.01 || Math.abs(r.win - exact.win) > 0.01;
+              simSpan.className = 'sim' + (diff ? ' diff' : '');
+              simSpan.textContent = `｜模擬 ${pct(r.win)}/${evPct(r.ev)}（${N.toLocaleString()}局）`;
+              simSpan.title = `模擬：勝 ${r.wins.toLocaleString()}、和 ${r.pushes.toLocaleString()}、負 ${r.losses.toLocaleString()}`;
+            }
+            jobsDone++;
+            const elapsedTotal = (Date.now() - t0) / 1000;
+            const avgPerJob = elapsedTotal / jobsDone;
+            const etaSec = avgPerJob * (jobs.length - jobsDone);
+            jobCountLine.textContent = `已完成 ${jobsDone} / ${jobs.length} 個動作；已花費 ${fmtTime(elapsedTotal)}；預估剩餘 ${fmtTime(etaSec)}（用目前平均速度估的，會隨速度變動調整）。`;
+          }
+          running = false;
+          startBtn.disabled = false; stopBtn.disabled = true; roundsInput.disabled = false;
+          if (!stopReq && jobsDone === jobs.length) statusLine.textContent = `全部跑完了：${jobs.length} 個動作，每個 ${N.toLocaleString()} 局，共花費 ${fmtTime((Date.now() - t0) / 1000)}。`;
+        }
+        function fmtTime(sec) {
+          if (!isFinite(sec) || sec < 0) return '—';
+          if (sec < 60) return Math.round(sec) + ' 秒';
+          if (sec < 3600) return Math.round(sec / 60) + ' 分鐘';
+          return (sec / 3600).toFixed(1) + ' 小時';
+        }
+        startBtn.addEventListener('click', start);
+        stopBtn.addEventListener('click', () => { stopReq = true; });
+        const box = h('div', { class: 'panel sim-bar' },
+          h('h3', { text: '🎲 模擬驗算', style: { marginTop: 0 } }),
+          h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '對每一格的每一個合法動作，各自真正玩 N 局：強制第一個動作，之後照目前規則下的最佳基本策略打到底，統計實際的勝率/EV，跟上面的精算數字對照。兩者應該很接近；如果差距明顯（紅字），代表局數還不夠多，或精算/模擬其中一處可能有問題，值得進一步檢查。' }),
+          h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), startBtn, stopBtn),
+          progWrap, statusLine, jobCountLine);
+        return { box, reset: () => { progFill.style.width = '0%'; statusLine.textContent = '按「開始模擬驗算」會依序對每一格的每個動作各跑設定的局數，可能要跑很久，隨時可以按「停止」，已經跑完的格子結果會留著。'; jobCountLine.textContent = ''; } };
+      }
+      let simUI;
 
       function buildControls() {
         const gameSel = h('select', null, [['star22', '麗星郵輪22點'], ['american', '美式21點'], ['british', '英式21點']].map(([v, t]) => h('option', { value: v, text: t })));
@@ -183,7 +339,7 @@
           small.value = Math.round(shown * 5 / 13);
           big.value = Math.round(shown * 5 / 13);
         } });
-        const goBtn = h('button', { class: 'btn-good', text: '重新計算', onclick: () => cfg() && render(cfg()) });
+        const goBtn = h('button', { class: 'btn-good', text: '重新精算', onclick: () => cfg() && render(cfg()) });
         const cfg = () => {
           const d = Math.max(1, +decks.value || 1), b = Math.max(0, +big.value || 0), s = Math.max(0, +small.value || 0);
           if (b + s >= d * 52) { alert('已出現的大牌＋小牌張數不能超過整個牌靴的張數'); return null; }
@@ -195,7 +351,7 @@
           h('div', { class: 'row' }, h('label', null, '本局已出現大牌(10/J/Q/K/A)　', big), h('label', null, '本局已出現小牌(2-6)　', small)),
           h('div', { class: 'row' }, h('label', null, '牌桌人數　', playersSel), estBtn),
           h('div', { class: 'row' }, goBtn),
-          h('small', { class: 'muted', text: '大牌／小牌已出現的張數，是從整副牌裡直接扣除（模擬這一局已經看過這些牌），計算方式跟「算牌方式」裡的「本局已出現大牌/小牌張數」完全一樣。「依人數估算」只是用平均值幫你猜一個起始值，可以手動改。' }));
+          h('small', { class: 'muted', text: '大牌／小牌已出現的張數，是從整副牌裡直接扣除（模擬這一局已經看過這些牌），計算方式跟「算牌方式」裡的「本局已出現大牌/小牌張數」完全一樣。「依人數估算」只是用平均值幫你猜一個起始值，可以手動改。改這裡的設定後要按「重新精算」。' }));
         return { box, cfg };
       }
 
@@ -223,9 +379,11 @@
           h('span', { text: auth.enabled() ? `👤 ${auth.user.name}（${auth.user.id}・管理者）` : '本機模式（視為管理者）' }));
         app.appendChild(bar);
         app.appendChild(h('h1', { text: '🧮 全策略試算' }));
-        app.appendChild(h('p', { class: 'muted', text: '370 格驗算表：硬牌 4~21、軟牌 A2~A21、對子 A,A~10,10，各對上莊家 10 種明牌，列出每個合法動作的勝率與每注期望值（EV）。純計算、唯讀，不會存進資料庫，也不影響任何其他頁面。' }));
+        app.appendChild(h('p', { class: 'muted', text: '370 格驗算表：硬牌 4~21、軟牌 A2~A21、對子 A,A~10,10，各對上莊家 10 種明牌，列出每個合法動作的勝率與每注期望值（EV）。精算瞬間完成；下面可以再加跑模擬驗算互相對照。純計算，不會存進資料庫，也不影響任何其他頁面。' }));
         const { box, cfg } = buildControls();
         app.appendChild(box);
+        simUI = buildSimController();
+        app.appendChild(simUI.box);
         app.appendChild(h('div', { id: 'result' }));
         const c = cfg();
         if (c) render(c);
