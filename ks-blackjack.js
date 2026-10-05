@@ -35,7 +35,8 @@
     freeSplit: false,           // 分牌免費：分出來的手贏照賠、輸不扣錢（22點）
     surrender: 'any2',          // 'any2' 任何未要牌的兩張 | 'first' 只限第一個動作 | 'none'
     surrenderAfterDouble: false,// 加倍後投降
-    returnSettledCards: false   // 爆牌、投降、先領錢的手牌立即收回牌靴洗牌
+    returnSettledCards: false,  // 爆牌、投降、先領錢的手牌立即收回牌靴洗牌
+    noSurrenderVsAce: false     // 莊家明牌 A 時不可投降（其他明牌仍照 surrender 規則）
   };
 
   const PRESETS = {
@@ -51,7 +52,8 @@
     star22: Object.assign({}, BASE_RULES, {
       name: '麗星郵輪22點', dealerHitSoft17: true, evenMoney: true, bjVsDealerBJ: 'push',
       dealerBJOriginalOnly: true, dealer22Push: true, maxHands: 4, resplitAces: false,
-      splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first', returnSettledCards: true
+      splitAcesOneCard: false, das: true, freeDouble: true, freeSplit: true, surrender: 'first', returnSettledCards: true,
+      noSurrenderVsAce: true
     })
   };
 
@@ -79,7 +81,8 @@
     ['freeSplit', 'bool', '分牌免費：分出來的每一手贏照賠一注、輸了不扣錢（原本那手照常輸贏）'],
     ['surrender', ['any2', 'first', 'none'], '投降：any2=任何未要牌兩張（含分牌後）；first=只限第一個動作；none=不可'],
     ['surrenderAfterDouble', 'bool', '加倍後可投降（退回原注）'],
-    ['returnSettledCards', 'bool', '爆牌、投降、先領錢的手牌立即收回牌靴洗牌（同一局就可能再發出來）。先領錢：BJ 確定贏（莊家明牌不是 A/10 點，或英式立即賠）、先收 1 倍、英式 21 點必勝']
+    ['returnSettledCards', 'bool', '爆牌、投降、先領錢的手牌立即收回牌靴洗牌（同一局就可能再發出來）。先領錢：BJ 確定贏（莊家明牌不是 A/10 點，或英式立即賠）、先收 1 倍、英式 21 點必勝'],
+    ['noSurrenderVsAce', 'bool', '莊家明牌 A 時不可投降（其他明牌仍照上面的投降規則）']
   ];
 
   /* ---------------- 手牌計算 ---------------- */
@@ -197,6 +200,7 @@
       if (R.surrender === 'any2') L.surrender = two && !hand.hitOnce && !hand.doubled;
       else if (R.surrender === 'first') L.surrender = two && !hand.fromSplit && hand.actions.length === 0;
       else L.surrender = false;
+      if (L.surrender && R.noSurrenderVsAce && dealerUpValue(this.dealer[0]) === 11) L.surrender = false;
       return L;
     }
     act(action) {
@@ -894,11 +898,11 @@
     const hardRep = { 4: [2, 2], 5: [2, 3], 6: [2, 4], 7: [2, 5], 8: [3, 5], 9: [4, 5], 10: [4, 6], 11: [5, 6], 12: [10, 2], 13: [10, 3], 14: [10, 4], 15: [10, 5], 16: [10, 6], 17: [10, 7], 18: [10, 8], 19: [10, 9], 20: [10, 10] };
     const v2i = v => (v === 11 || v === 1 ? 0 : v === 10 ? 9 : v - 1);
     const i2r = i => (i === 0 ? 'A' : i === 9 ? '10' : String(i + 1));
-    const L2 = { hit: true, stand: true, double: true, surrender: R.surrender !== 'none', doubleFree: false };
     const evTable = { hard: {}, soft: {}, pair: {} };
     const evOf = e => { const o = {}; ['stand', 'hit', 'double', 'surrender', 'split'].forEach(k => { if (e[k]) o[k] = e[k].ev; }); return o; };
     DEALER_VALS.forEach(d => {
       const upI = v2i(d);
+      const L2 = { hit: true, stand: true, double: true, surrender: R.surrender !== 'none' && !(R.noSurrenderVsAce && d === 11), doubleFree: false };
       const base = full.slice(); if (base[upI] > 0) base[upI]--;
       const D = dealerDist(upI, base, R);
       s.hitMap[d] = []; s.standMap[d] = []; s.hardDoubleMap[d] = []; s.softDoubleMap[d] = [];

@@ -364,7 +364,9 @@
           h('h3', { text: '🛠 管理', style: { marginTop: 0 } }),
           h('div', { class: 'row' }, refreshBtn, h('label', null, onlyActive, ' 只看使用中'), filter),
           info, pendBox, devBox,
-          h('small', { class: 'muted', text: '使用中＝5 分鐘內有操作；剛離開＝30 分鐘內。「最後使用」在玩家操作網站時每分鐘最多更新一次。面板打開時每分鐘自動重新整理。' }));
+          h('small', { class: 'muted', text: '使用中＝5 分鐘內有操作；剛離開＝30 分鐘內。「最後使用」在玩家操作網站時每分鐘最多更新一次。面板打開時每分鐘自動重新整理。' }),
+          h('div', { class: 'row', style: { marginTop: '10px' } },
+            h('a', { href: 'ks-verify.html', target: '_blank', text: '🧮 全策略試算（370 格驗算表）' })));
         box.open = () => {
           load();
           if (!timer) timer = setInterval(() => { if (!box.hidden && document.visibilityState === 'visible') load(); }, 60e3);
