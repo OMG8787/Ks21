@@ -39,6 +39,13 @@
     .sim-progress { height: 10px; background: #e3e8f1; border-radius: 6px; overflow: hidden; margin: 6px 0; }
     .sim-progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
     .sim-status { font-size: 13px; }
+    .pick-wrap { border: 1px solid #dfe5ee; border-radius: 8px; padding: 6px 10px; margin: 6px 0; max-height: 45vh; overflow-y: auto; }
+    .pick-group { margin: 4px 0; }
+    .pick-group > b { margin-right: 6px; }
+    .pick-group > button { padding: 1px 8px; margin-right: 4px; }
+    .pick-items { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 3px; }
+    .pick-item { font-size: 13px; white-space: nowrap; cursor: pointer; }
+    .pick-item input { margin-right: 3px; }
   </style>
   <script src="ks-config.js"></script>
   <script src="ks-login-guard.js"></script>
@@ -48,6 +55,7 @@
   <div class="wrap" id="app" style="max-width:1100px;margin:0 auto;"></div>
   <script src="ks-core.js"></script>
   <script src="ks-blackjack.js"></script>
+  <script src="ks-verify-sim.js"></script>
   <script src="ks-auth.js"></script>
   <script>
     (function () {
@@ -248,117 +256,61 @@
         return jobs;
       }
 
-      // 跑單一「格子 + 動作」：強制第一個動作，之後照最佳基本策略打到底（跟精算一樣的規則、牌組設定）
-      // 每一局都用設定的牌組組成重新洗牌，牌況不會隨著跑的局數累積變化，才能跟精算（固定組成）互相對照
-      const LOG_LIMIT = 50; // 每個「格子＋動作」最多留幾筆局紀錄給人工檢查
-      function newStats() {
-        return { rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
-          dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0, acc: new KSU.Acc() };
-      }
-      function simulateJob(R, baseCounts, opt, job, N, onChunk, shouldStop) {
-        return new Promise(resolve => {
-          const upRank = upLabelOf(job.d);
-          const shoe = new KSU.Shoe({ counts: baseCounts, penetration: 1 });
-          const S = newStats();
-          let i = 0;
-          const logs = [];
-          function tick() {
-            if (shouldStop()) { resolve({ done: i, stopped: true, logs, S }); return; }
-            const t0 = Date.now();
-            while (i < N && Date.now() - t0 < 25) {
-              shoe.shuffle();
-              const rd = new BJ.Round({ rules: R, shoe: shoe }, [{ bet: 1, fixed: job.cards }], { dealerUp: upRank }).start();
-              let first = true;
-              let guard = 0;
-              while (rd.phase === 'player' && guard++ < 50) {
-                const c = rd.current();
-                const L = rd.legal(c.hand, c.seat);
-                let a;
-                if (first) { a = L[job.action] ? job.action : 'stand'; first = false; }
-                else a = BJ.decide(opt, c.hand, rd.dealer[0], L, {});
-                rd.act(L[a] ? a : 'stand');
-              }
-              rd.playDealer();
-              const seat = rd.seats[0];
-              if (logs.length < LOG_LIMIT) {
-                logs.push({
-                  dealer: rd.dealer.map(KSU.cardText), dealerOutcome: rd.dealerOutcome(),
-                  hands: seat.hands.map(x => ({ cards: x.cards.map(KSU.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble, freeSplit: x.freeSplit })),
-                  net: seat.net
-                });
-              }
-              // 跟遊戲「模擬」頁同一套統計方式（Simulator.step()）
-              S.rounds++;
-              let wager = 0;
-              seat.hands.forEach(x => {
-                S.hands++;
-                wager += x.stake;
-                if (x.result === 'W') S.hW++; else if (x.result === 'L') S.hL++; else S.hP++;
-                if (x.isBJ) S.bj++;
-                if (x.bust) S.bust++;
-                if (x.surrendered) S.surrender++;
-                if (x.evenMoney) S.even++;
-                if (x.doubled) { if (x.freeDouble) { S.dblFree++; if (x.result === 'W') S.dblFreeW++; } else { S.dbl++; if (x.result === 'W') S.dblW++; } }
-                if (x.fromSplit) { S.splitHands++; if (x.result === 'W') S.splitW++; }
-              });
-              S.wagered += wager;
-              S.net += seat.net;
-              S.acc.add(seat.net / 1);
-              if (seat.result === 'W') S.rW++; else if (seat.result === 'L') S.rL++; else S.rP++;
-              shoe.endRound();
-              i++;
-            }
-            // 勝率用「所有手」去算（分牌後是幾手就算幾手）：10 局都分牌 → 20 手，就拿這 20 手的勝/和/負去算勝率
-            const handWin = S.hW / Math.max(1, S.hW + S.hL);
-            onChunk(i, N, `暫估 勝率 ${pct(handWin)}／EV ${evPct(S.acc.mean())}`);
-            if (i >= N) { resolve({ done: i, stopped: false, win: handWin, ev: S.acc.mean(), wins: S.rW, pushes: S.rP, losses: S.rL, logs, S }); return; }
-            setTimeout(tick, 0);
-          }
-          tick();
-        });
-      }
-
-      // 投降：玩家固定輸半注，不用模擬玩家；改成統計「投降後莊家如果繼續補牌」的結果
-      const DEALER_OUTS = ['BJ', '17', '18', '19', '20', '21', '22', 'bust'];
+      // 模擬核心在 ks-verify-sim.js（主畫面和背景執行緒共用同一份）
+      const SIM = window.KSVerifySim;
+      const LOG_LIMIT = SIM.LOG_LIMIT;
+      const DEALER_OUTS = SIM.DEALER_OUTS;
       const DOUT_LABEL = { BJ: 'BJ', '17': '17', '18': '18', '19': '19', '20': '20', '21': '21', '22': '22(平手)', bust: '爆牌' };
-      function simulateSurrenderJob(R, baseCounts, job, N, onChunk, shouldStop) {
-        return new Promise(resolve => {
-          const upRank = upLabelOf(job.d);
-          const shoe = new KSU.Shoe({ counts: baseCounts, penetration: 1 });
-          const D = { rounds: 0 };
-          DEALER_OUTS.forEach(k => { D[k] = 0; });
-          let i = 0;
-          const logs = [];
-          function tick() {
-            if (shouldStop()) { resolve({ done: i, stopped: true, logs, D }); return; }
-            const t0 = Date.now();
-            while (i < N && Date.now() - t0 < 25) {
-              shoe.shuffle();
-              const rd = new BJ.Round({ rules: R, shoe: shoe }, [{ bet: 1, fixed: job.cards }], { dealerUp: upRank }).start();
-              if (rd.phase === 'player') { const c = rd.current(); const L = rd.legal(c.hand, c.seat); rd.act(L.surrender ? 'surrender' : 'stand'); } // 投降（牌收回牌靴的規則會在這裡把玩家的牌洗回去）
-              const dealer = rd.dealer.slice();
-              dealer.push(shoe.draw()); // 莊家第二張
-              const bj = BJ.isTwoCard21(dealer);
-              if (!bj) {
-                for (;;) {
-                  const inf = BJ.handInfo(dealer);
-                  if (inf.total < 17 || (inf.total === 17 && inf.soft && R.dealerHitSoft17)) dealer.push(shoe.draw());
-                  else break;
-                }
-              }
-              const t = BJ.handTotal(dealer);
-              const out = bj ? 'BJ' : (t === 22 && R.dealer22Push) ? '22' : t > 21 ? 'bust' : String(t);
-              D[out]++; D.rounds++;
-              if (logs.length < LOG_LIMIT) logs.push({ player: rd.seats[0].hands[0].cards.map(KSU.cardText), dealer: dealer.map(KSU.cardText), total: t, out });
-              shoe.endRound();
-              i++;
-            }
-            onChunk(i, N, `莊家補完 暫估爆牌 ${pct(D.bust / Math.max(1, i))}`);
-            if (i >= N) { resolve({ done: i, stopped: false, logs, D, bust: D.bust / N }); return; }
-            setTimeout(tick, 0);
-          }
-          tick();
-        });
+
+      /* ---------------- 平行計算：每一條「通道」是一個 Web Worker（獨立執行緒、各用一顆 CPU 核心） ----------------
+       * JS 本身是單執行緒：只用 async／setTimeout 分成幾條，其實還是同一顆核心輪流跑，不會變快；
+       * 要用 Worker 才是真的同時算。瀏覽器不能開 Worker 時（例如直接用 file:// 開），改用主畫面單核心慢慢跑。 */
+      const MAX_LANES = 16;
+      const autoLanes = () => Math.max(1, Math.min(MAX_LANES, (navigator.hardwareConcurrency || 4) - 1));
+      function workerLane() {
+        const w = new Worker('ks-verify-sim.js'); // file:// 開的話這裡會丟錯，外面改用主畫面
+        let cur = null;
+        const finish = (fn, v) => { const c = cur; cur = null; if (c) c[fn](v); };
+        w.onmessage = e => {
+          const m = e.data;
+          if (!cur) return;
+          if (m.type === 'progress') cur.onProgress(m.done);
+          else if (m.type === 'done') { cur.onProgress(m.done); finish('resolve', m.res); }
+          else if (m.type === 'error') finish('reject', new Error(m.message));
+        };
+        w.onerror = e => { e.preventDefault(); finish('reject', new Error(e.message || '背景計算載入失敗')); };
+        return {
+          run(task, onProgress) {
+            return new Promise((resolve, reject) => {
+              cur = { resolve, reject, onProgress };
+              w.postMessage({ type: 'run', R: task.R, baseCounts: task.baseCounts, job: task.job, n: task.n, wantLogs: task.wantLogs });
+            });
+          },
+          stop() { w.terminate(); finish('resolve', null); }
+        };
+      }
+      function mainLane() {
+        let stopped = false, cur = null;
+        return {
+          run(task, onProgress) {
+            return new Promise(resolve => {
+              const runner = SIM.makeRunner(task.R, task.baseCounts, task.opt, task.job, task.n, task.wantLogs);
+              cur = resolve;
+              (function tick() {
+                if (stopped) return;
+                const fin = runner.step(25); // 每次只跑 25ms，畫面才不會卡住
+                onProgress(runner.done);
+                if (fin) { cur = null; resolve(runner.result()); } else setTimeout(tick, 0);
+              })();
+            });
+          },
+          stop() { stopped = true; if (cur) { const c = cur; cur = null; c(null); } }
+        };
+      }
+      // Worker 傳回來的 Acc 只剩資料（n/sum/sq），要接回 mean()/sd() 這些方法
+      function reviveStats(res) {
+        if (res.S) res.S.acc = Object.assign(new KSU.Acc(), res.S.acc);
+        return res;
       }
 
       function fmtStatsTable(S, isSplit) {
@@ -429,14 +381,19 @@
         const stopBtn = h('button', { class: 'btn-danger', text: '■ 停止', disabled: true });
         const progFill = h('div');
         const progWrap = h('div', { class: 'sim-progress' }, progFill);
-        const IDLE = '按「開始模擬驗算」會依序對選定範圍內每一格的每個動作各跑設定的局數，隨時可以按「停止」，已經跑完的格子結果會留著。';
+        const IDLE = '按「開始模擬驗算」會對選定範圍內每一格的每個動作各跑設定的局數（分給好幾條平行通道同時跑），隨時可以按「停止」，已經跑完的格子結果會留著。';
         const statusLine = h('div', { class: 'sim-status muted', text: IDLE });
         const jobCountLine = h('div', { class: 'muted' });
-        let stopReq = false;
+        let stopReq = false, lanes = [];
+
+        // 平行通道數
+        const AUTO = autoLanes();
+        const lanesSel = h('select', null, [['auto', `自動（${AUTO} 條）`], ...[1, 2, 4, 8, 16].filter(n => n <= MAX_LANES).map(n => [String(n), n + ' 條'])].map(([v, t]) => h('option', { value: v, text: t })));
+        lanesSel.title = `這台電腦有 ${navigator.hardwareConcurrency || '?'} 個 CPU 邏輯核心；每條通道用一顆核心，自動＝核心數減 1（留一顆給畫面），最多 ${MAX_LANES} 條。`;
 
         // 範圍選擇
         const CARD_OPTS = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-        const modeSel = h('select', null, [['all', '全部計算（預設）'], ['player', '指定玩家牌'], ['dealer', '指定莊家牌'], ['both', '指定玩家跟莊家']].map(([v, t]) => h('option', { value: v, text: t })));
+        const modeSel = h('select', null, [['all', '全部計算（預設）'], ['player', '指定玩家牌'], ['dealer', '指定莊家牌'], ['both', '指定玩家跟莊家'], ['pick', '勾選要算的牌型']].map(([v, t]) => h('option', { value: v, text: t })));
         const c1Sel = h('select', null, CARD_OPTS.map(r => h('option', { value: r, text: r })));
         const c2Sel = h('select', null, CARD_OPTS.map(r => h('option', { value: r, text: r })));
         c1Sel.value = '10'; c2Sel.value = '6';
@@ -445,14 +402,61 @@
         const playerWrap = h('span', null, '玩家牌　', c1Sel, ' ', c2Sel, '　');
         const dealerWrap = h('span', null, '莊家明牌　', upSel);
         const selHint = h('small', { class: 'muted' });
+
+        // 勾選模式：玩家牌型（硬／軟／對子）＋莊家明牌，各自打勾；勾選內容記在這台瀏覽器
+        const PICK_KEY = 'ks.verify.pick';
+        const saved = KSU.store.get(PICK_KEY, null) || {};
+        const savedRows = new Set(saved.rows || []);
+        const savedDs = new Set(saved.ds || BJ.DEALER_VALS);
+        const rowBoxes = [], dBoxes = [];
+        const pickLabel = (kind, key) => (kind === 'hard' ? '硬' + key : kind === 'soft' ? '軟' + (key - 11) + '（A,' + (key - 11) + '）' : '對子' + (key === 11 ? 'A' : key));
+        function checkbox(list, value, text, checked) {
+          const cb = h('input', { type: 'checkbox' });
+          cb.checked = checked; cb.value = value;
+          cb.addEventListener('change', onPickChange);
+          list.push(cb);
+          return h('label', { class: 'pick-item' }, cb, text);
+        }
+        function groupRow(title, list, items) {
+          const start = list.length;
+          const labels = items.map(([v, t, on]) => checkbox(list, v, t, on));
+          const mine = () => list.slice(start, start + items.length);
+          const setAll = on => { mine().forEach(cb => { cb.checked = on; }); onPickChange(); };
+          return h('div', { class: 'pick-group' },
+            h('b', { text: title }),
+            h('button', { class: 'btn-small btn-ghost', text: '全選', onclick: () => setAll(true) }),
+            h('button', { class: 'btn-small btn-ghost', text: '清除', onclick: () => setAll(false) }),
+            h('div', { class: 'pick-items' }, labels));
+        }
+        const rowItems = kind => (kind === 'hard' ? HARD_ORDER.filter(k => k !== 21).slice().reverse() : kind === 'soft' ? SOFT_ORDER.filter(k => k !== 21).slice().reverse() : PAIR_VALS)
+          .map(key => [`${kind}-${key}`, pickLabel(kind, key), savedRows.has(`${kind}-${key}`)]);
+        const pickWrap = h('div', { class: 'pick-wrap' },
+          groupRow('硬牌', rowBoxes, rowItems('hard')),
+          groupRow('軟牌', rowBoxes, rowItems('soft')),
+          groupRow('對子', rowBoxes, rowItems('pair')),
+          groupRow('莊家明牌', dBoxes, BJ.DEALER_VALS.map(d => [String(d), upLabelOf(d), savedDs.has(d)])));
+        function pickState() {
+          return { rows: rowBoxes.filter(cb => cb.checked).map(cb => cb.value), ds: dBoxes.filter(cb => cb.checked).map(cb => +cb.value) };
+        }
+        function onPickChange() {
+          KSU.store.set(PICK_KEY, pickState());
+          refreshSel();
+        }
+
         function refreshSel() {
           const m = modeSel.value;
           playerWrap.style.display = m === 'player' || m === 'both' ? '' : 'none';
           dealerWrap.style.display = m === 'dealer' || m === 'both' ? '' : 'none';
+          pickWrap.style.display = m === 'pick' ? '' : 'none';
           selHint.textContent = '';
           if ((m === 'player' || m === 'both') && lastCfg) {
             const c = classifyCards(c1Sel.value, c2Sel.value, BJ.PRESETS[lastCfg.game]);
             selHint.textContent = c.err ? '⚠️ ' + c.err : `→ 對應表格「${rowLabel(c.kind, c.key)}」那一列，精算和模擬都會改用 ${c1Sel.value},${c2Sel.value} 這兩張牌`;
+          }
+          if (m === 'pick' && lastRows) {
+            const p = pickState();
+            const n = p.rows.length && p.ds.length ? selectJobs(selection()).length : 0;
+            selHint.textContent = `已勾選 ${p.rows.length} 種牌型 × 莊家 ${p.ds.length} 種 → 共 ${n} 個「格子＋動作」要跑（用表格的代表牌，例如硬16＝10,6）。`;
           }
         }
         [modeSel, c1Sel, c2Sel].forEach(x => x.addEventListener('change', refreshSel));
@@ -467,8 +471,69 @@
             Object.assign(sel, c, { cards: [c1Sel.value, c2Sel.value] });
           }
           if (m === 'dealer' || m === 'both') sel.d = +upSel.value;
+          if (m === 'pick') {
+            const p = pickState();
+            if (!p.rows.length) return { err: '請至少勾選一種玩家牌型。' };
+            if (!p.ds.length) return { err: '請至少勾選一種莊家明牌。' };
+            sel.rows = new Set(p.rows); sel.ds = new Set(p.ds);
+            const names = p.rows.map(v => { const [kind, key] = v.split('-'); return pickLabel(kind, +key).replace(/（.*）/, ''); });
+            sel.label = `勾選 ${names.length > 8 ? names.slice(0, 8).join('、') + ` 等 ${names.length} 種` : names.join('、')}；莊家 ${p.ds.length === BJ.DEALER_VALS.length ? '全部' : p.ds.map(upLabelOf).join('、')}`;
+            return sel;
+          }
           sel.label = m === 'all' ? '全部' : [sel.cards ? `玩家 ${sel.cards.join(',')}（${rowLabel(sel.kind, sel.key)}）` : '', sel.d ? `莊家 ${upLabelOf(sel.d)}` : ''].filter(Boolean).join('、');
           return sel;
+        }
+        function selectJobs(sel) {
+          const jobs = buildJobs(lastRows).filter(j =>
+            (sel.rows ? sel.rows.has(`${j.kind}-${j.key}`) : (sel.kind == null || (j.kind === sel.kind && j.key === sel.key))) &&
+            (sel.ds ? sel.ds.has(j.d) : (sel.d == null || j.d === sel.d)));
+          if (sel.cards) jobs.forEach(j => { j.cards = sel.cards.slice(); });
+          return jobs;
+        }
+
+        // 一個「格子＋動作」跑完：寫進表格
+        function writeResult(job, r, N, handLabel) {
+          const simSpan = document.querySelector(`[data-sim="${jobKey(job.kind, job.key, job.d, job.action)}"]`);
+          if (!simSpan) return;
+          const upLabel = upLabelOf(job.d);
+          const exact = lastRows[job.kind][job.key][job.d][job.action];
+          simSpan.innerHTML = '';
+          let title, statsHtml, rows;
+          if (job.action === 'surrender') {
+            const bust = r.D.bust / Math.max(1, r.D.rounds);
+            const diff = Math.abs(bust - exact.dealerD.bust) > 0.01;
+            simSpan.className = 'sim' + (diff ? ' diff' : '');
+            simSpan.title = `模擬：莊家爆牌 ${r.D.bust.toLocaleString()} / ${N.toLocaleString()} 局`;
+            simSpan.appendChild(document.createTextNode(`｜模擬 莊爆 ${pct(bust)}（${N.toLocaleString()}局）`));
+            title = `投降後莊家補牌：${handLabel} 對莊家 ${upLabel}（精算 莊爆 ${pct(exact.dealerD.bust)}；模擬 莊爆 ${pct(bust)}，共 ${N.toLocaleString()} 局）`;
+            statsHtml = fmtSurrenderTable(r.D, exact.dealerD);
+            rows = r.logs.map(fmtSurrenderLog);
+          } else {
+            const S = r.S;
+            // 勝率用「所有手」去算（分牌後是幾手就算幾手）：10 局都分牌 → 20 手，就拿這 20 手的勝/和/負去算勝率
+            const win = S.hW / Math.max(1, S.hW + S.hL), ev = S.acc.mean();
+            const diff = Math.abs(ev - exact.ev) > 0.01 || Math.abs(win - exact.win) > 0.01;
+            simSpan.className = 'sim' + (diff ? ' diff' : '');
+            simSpan.title = `模擬：勝 ${S.rW.toLocaleString()}、和 ${S.rP.toLocaleString()}、負 ${S.rL.toLocaleString()}（局）`;
+            simSpan.appendChild(document.createTextNode(`｜模擬 ${pct(win)}/${evPct(ev)}（${N.toLocaleString()}局）`));
+            title = `模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；模擬 勝率 ${pct(win)}/EV ${evPct(ev)}，共 ${N.toLocaleString()} 局）`;
+            statsHtml = fmtStatsTable(S, job.action === 'split');
+            rows = r.logs.map(fmtSimLog);
+          }
+          if (r.logs && r.logs.length) {
+            simSpan.appendChild(h('a', {
+              href: '#', class: 'sim-log-link', text: '🔍',
+              title: `看統計表和其中 ${r.logs.length} 筆實際模擬的局`,
+              onclick: ev2 => { ev2.preventDefault(); ev2.stopPropagation(); openSimDetail(title, statsHtml, rows); }
+            }));
+          }
+        }
+
+        function lockInputs(on) {
+          startBtn.disabled = on; stopBtn.disabled = !on;
+          roundsInput.disabled = lanesSel.disabled = modeSel.disabled = c1Sel.disabled = c2Sel.disabled = upSel.disabled = on;
+          rowBoxes.concat(dBoxes).forEach(cb => { cb.disabled = on; });
+          pickWrap.querySelectorAll('button').forEach(b => { b.disabled = on; });
         }
 
         async function start() {
@@ -479,72 +544,93 @@
           if (customRow && !(sel.cards && customRow.kind === sel.kind && customRow.key === sel.key && customRow.cards.join() === sel.cards.join())) restoreCustomRow();
           if (sel.cards) recalcRow(sel.kind, sel.key, sel.cards);
           const N = Math.max(1000, Math.floor(+roundsInput.value) || 10000000);
-          let jobs = buildJobs(lastRows).filter(j => (sel.kind == null || (j.kind === sel.kind && j.key === sel.key)) && (sel.d == null || j.d === sel.d));
-          if (sel.cards) jobs.forEach(j => { j.cards = sel.cards.slice(); });
+          const jobs = selectJobs(sel);
           if (!jobs.length) { statusLine.textContent = '⚠️ 這個範圍沒有可以模擬的格子。'; return; }
           const R = Object.assign({}, BJ.PRESETS[lastCfg.game]);
           const baseCounts = baseComposition(lastCfg);
-          const opt = BJ.generateOptimalStrategy(R, baseCounts);
-          const nSur = jobs.filter(j => j.action === 'surrender').length;
-          jobCountLine.textContent = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」要跑（其中 ${nSur} 個是投降，只模擬莊家補牌，很快），每個 ${N.toLocaleString()} 局。`;
-          stopReq = false;
-          startBtn.disabled = true; stopBtn.disabled = false; roundsInput.disabled = true; modeSel.disabled = c1Sel.disabled = c2Sel.disabled = upSel.disabled = true;
-          const t0 = Date.now();
-          let jobsDone = 0;
-          for (const job of jobs) {
-            const upLabel = upLabelOf(job.d);
-            const handLabel = sel.cards ? `${rowLabel(job.kind, job.key)}（${job.cards.join(',')}）` : rowLabel(job.kind, job.key);
-            const td = ui.$(`td-${job.kind}-${job.key}-${job.d}`);
-            if (td) td.classList.add('running');
-            const isSur = job.action === 'surrender';
-            const onChunk = (done, total, note) => {
-              statusLine.textContent = `[玩家：${handLabel}，莊家 ${upLabel}] ${ACT_NAME[job.action]}　${done.toLocaleString()} / ${total.toLocaleString()}　（${note}）`;
-              progFill.style.width = (done / total * 100) + '%';
-            };
-            const r = isSur ? await simulateSurrenderJob(R, baseCounts, job, N, onChunk, () => stopReq)
-              : await simulateJob(R, baseCounts, opt, job, N, onChunk, () => stopReq);
-            if (td) td.classList.remove('running');
-            if (r.stopped) {
-              statusLine.textContent = `已停止。這一格（${handLabel} vs ${upLabel}，${ACT_NAME[job.action]}）跑到 ${r.done.toLocaleString()} / ${N.toLocaleString()} 局，沒有寫入（局數不足，結果不穩定，不採用）。已完成 ${jobsDone} / ${jobs.length} 個動作。`;
-              break;
-            }
-            const simSpan = document.querySelector(`[data-sim="${jobKey(job.kind, job.key, job.d, job.action)}"]`);
-            if (simSpan) {
-              const exact = lastRows[job.kind][job.key][job.d][job.action];
-              simSpan.innerHTML = '';
-              let title, statsHtml, rows;
-              if (isSur) {
-                const diff = Math.abs(r.bust - exact.dealerD.bust) > 0.01;
-                simSpan.className = 'sim' + (diff ? ' diff' : '');
-                simSpan.title = `模擬：莊家爆牌 ${r.D.bust.toLocaleString()} / ${N.toLocaleString()} 局`;
-                simSpan.appendChild(document.createTextNode(`｜模擬 莊爆 ${pct(r.bust)}（${N.toLocaleString()}局）`));
-                title = `投降後莊家補牌：${handLabel} 對莊家 ${upLabel}（精算 莊爆 ${pct(exact.dealerD.bust)}；模擬 莊爆 ${pct(r.bust)}，共 ${N.toLocaleString()} 局）`;
-                statsHtml = fmtSurrenderTable(r.D, exact.dealerD);
-                rows = r.logs.map(fmtSurrenderLog);
-              } else {
-                const diff = Math.abs(r.ev - exact.ev) > 0.01 || Math.abs(r.win - exact.win) > 0.01;
-                simSpan.className = 'sim' + (diff ? ' diff' : '');
-                simSpan.title = `模擬：勝 ${r.wins.toLocaleString()}、和 ${r.pushes.toLocaleString()}、負 ${r.losses.toLocaleString()}（局）`;
-                simSpan.appendChild(document.createTextNode(`｜模擬 ${pct(r.win)}/${evPct(r.ev)}（${N.toLocaleString()}局）`));
-                title = `模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；模擬 勝率 ${pct(r.win)}/EV ${evPct(r.ev)}，共 ${N.toLocaleString()} 局）`;
-                statsHtml = fmtStatsTable(r.S, job.action === 'split');
-                rows = r.logs.map(fmtSimLog);
-              }
-              if (r.logs && r.logs.length) {
-                simSpan.appendChild(h('a', {
-                  href: '#', class: 'sim-log-link', text: '🔍',
-                  title: `看統計表和其中 ${r.logs.length} 筆實際模擬的局`,
-                  onclick: ev2 => { ev2.preventDefault(); ev2.stopPropagation(); openSimDetail(title, statsHtml, rows); }
-                }));
-              }
-            }
-            jobsDone++;
-            const elapsedTotal = (Date.now() - t0) / 1000;
-            const etaSec = elapsedTotal / jobsDone * (jobs.length - jobsDone);
-            jobCountLine.textContent = `範圍：${sel.label}；已完成 ${jobsDone} / ${jobs.length} 個動作；已花費 ${fmtTime(elapsedTotal)}；預估剩餘 ${fmtTime(etaSec)}（用目前平均速度估的，會隨速度變動調整）。`;
+
+          // 開通道：先試 Worker（真的多核心），不行就退回主畫面單核心
+          let want = lanesSel.value === 'auto' ? AUTO : +lanesSel.value;
+          let mode = 'worker', note = '';
+          lanes = [];
+          try { for (let i = 0; i < want; i++) lanes.push(workerLane()); }
+          catch (e) {
+            lanes.forEach(l => l.stop());
+            lanes = [mainLane()]; mode = 'main'; want = 1;
+            note = '（這個瀏覽器／開啟方式不能開背景執行緒，改用單核心跑；請用網址 https://… 開這個頁面才能平行）';
           }
-          startBtn.disabled = false; stopBtn.disabled = true; roundsInput.disabled = false; modeSel.disabled = c1Sel.disabled = c2Sel.disabled = upSel.disabled = false;
-          if (!stopReq && jobsDone === jobs.length) statusLine.textContent = `跑完了（範圍：${sel.label}）：${jobs.length} 個動作，每個 ${N.toLocaleString()} 局，共花費 ${fmtTime((Date.now() - t0) / 1000)}。`;
+          const opt = mode === 'main' ? BJ.generateOptimalStrategy(R, baseCounts) : null;
+
+          // 切工作：動作數比通道少的時候（例如只跑一格），把同一個動作的局數拆成幾段分給不同通道，最後合併
+          const shards = Math.max(1, Math.min(Math.ceil(want / jobs.length), Math.floor(N / 1000)));
+          const tasks = [];
+          const states = jobs.map((job, ji) => {
+            const st = { job, parts: [], left: shards, running: 0, done: 0 };
+            for (let s = 0; s < shards; s++) {
+              const n = Math.floor(N / shards) + (s < N % shards ? 1 : 0);
+              tasks.push({ ji, n, wantLogs: s === 0, R, baseCounts, opt, job });
+            }
+            return st;
+          });
+          const totalRounds = N * jobs.length;
+          const nSur = jobs.filter(j => j.action === 'surrender').length;
+          const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降，只模擬莊家補牌，很快），每個 ${N.toLocaleString()} 局；平行 ${lanes.length} 條通道${note}。`;
+          jobCountLine.textContent = scopeLine;
+          stopReq = false;
+          lockInputs(true);
+          const t0 = Date.now();
+          let jobsDone = 0, roundsDone = 0, nextTask = 0, failed = null;
+          const handLabelOf = job => (sel.cards ? `${rowLabel(job.kind, job.key)}（${job.cards.join(',')}）` : rowLabel(job.kind, job.key));
+          const runningSet = new Set();
+
+          let lastPaint = 0;
+          function paint(force) {
+            const now = Date.now();
+            if (!force && now - lastPaint < 150) return;
+            lastPaint = now;
+            progFill.style.width = (roundsDone / totalRounds * 100) + '%';
+            const names = Array.from(runningSet).map(st => `[${handLabelOf(st.job)} vs ${upLabelOf(st.job.d)}] ${ACT_NAME[st.job.action]}`);
+            statusLine.textContent = `${roundsDone.toLocaleString()} / ${totalRounds.toLocaleString()} 局（${(roundsDone / totalRounds * 100).toFixed(1)}%）　正在跑：${names.slice(0, 4).join('、')}${names.length > 4 ? ` 等 ${names.length} 個` : ''}`;
+            const elapsed = (now - t0) / 1000;
+            const eta = roundsDone > 0 ? elapsed / roundsDone * (totalRounds - roundsDone) : NaN;
+            jobCountLine.textContent = `${scopeLine} 已完成 ${jobsDone} / ${jobs.length} 個動作；已花費 ${fmtTime(elapsed)}；預估剩餘 ${fmtTime(eta)}（用目前平均速度估的；投降的動作比較快，所以會隨著跑到哪裡變動）。`;
+          }
+
+          async function laneLoop(lane) {
+            while (!stopReq && !failed && nextTask < tasks.length) {
+              const task = tasks[nextTask++];
+              const st = states[task.ji];
+              const td = ui.$(`td-${st.job.kind}-${st.job.key}-${st.job.d}`);
+              st.running++; runningSet.add(st);
+              if (td) td.classList.add('running');
+              let seen = 0;
+              let res;
+              try {
+                res = await lane.run(task, d => { roundsDone += d - seen; seen = d; paint(false); });
+              } catch (e) { failed = e; break; }
+              st.running--;
+              if (!st.running) runningSet.delete(st);
+              if (td && ![...runningSet].some(x => x.job.kind === st.job.kind && x.job.key === st.job.key && x.job.d === st.job.d)) td.classList.remove('running');
+              if (!res) break; // 被停止
+              st.parts.push(reviveStats(res));
+              if (--st.left === 0) {
+                writeResult(st.job, reviveStats(SIM.mergeResults(st.parts.sort((a, b) => (b.logs.length - a.logs.length)))), N, handLabelOf(st.job));
+                st.parts = null;
+                jobsDone++;
+              }
+              paint(false);
+            }
+          }
+          await Promise.all(lanes.map(laneLoop));
+          lanes.forEach(l => l.stop());
+          lanes = [];
+          document.querySelectorAll('.vt-cell.running').forEach(td => td.classList.remove('running'));
+          lockInputs(false);
+          paint(true);
+          const spent = fmtTime((Date.now() - t0) / 1000);
+          if (failed) statusLine.textContent = `⚠️ 背景計算出錯，已停止：${failed.message}。已完成 ${jobsDone} / ${jobs.length} 個動作。`;
+          else if (stopReq) statusLine.textContent = `已停止。已完成 ${jobsDone} / ${jobs.length} 個動作（花費 ${spent}）；還沒跑完的格子沒有寫入（局數不足，結果不穩定，不採用）。`;
+          else statusLine.textContent = `跑完了（範圍：${sel.label}）：${jobs.length} 個動作，每個 ${N.toLocaleString()} 局，平行 ${want} 條通道，共花費 ${spent}。`;
         }
         function fmtTime(sec) {
           if (!isFinite(sec) || sec < 0) return '—';
@@ -553,13 +639,15 @@
           return (sec / 3600).toFixed(1) + ' 小時';
         }
         startBtn.addEventListener('click', start);
-        stopBtn.addEventListener('click', () => { stopReq = true; });
+        // 停止：馬上關掉所有背景通道（正在跑的那幾格不寫入）
+        stopBtn.addEventListener('click', () => { stopReq = true; lanes.forEach(l => l.stop()); });
         const box = h('div', { class: 'panel sim-bar' },
           h('h3', { text: '🎲 模擬驗算', style: { marginTop: 0 } }),
           h('p', { class: 'muted', style: { margin: '0 0 6px' }, text: '對選定範圍內每一格的每一個合法動作，各自真正玩 N 局：強制第一個動作，之後照目前規則下的最佳基本策略打到底，統計實際的勝率/EV，跟下面的精算數字對照。投降固定輸半注，改成統計投降後莊家如果繼續補牌的爆牌率。紅字＝模擬跟精算的勝率或 EV 差超過 1 個百分點。局數少（例如 1 萬局以下）時可能只是運氣；局數夠多（例如 100 萬局以上，誤差小於 0.1 個百分點）還是紅字，代表兩邊算法本身有差，點 🔍 看說明（例如分牌的精算沒有算再分牌）。' }),
           h('div', { class: 'row' }, h('label', null, '範圍　', modeSel), playerWrap, dealerWrap),
+          pickWrap,
           selHint,
-          h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), startBtn, stopBtn),
+          h('div', { class: 'row' }, h('label', null, '每個動作模擬局數　', roundsInput), h('label', null, '平行通道　', lanesSel), startBtn, stopBtn),
           progWrap, statusLine, jobCountLine);
         return { box, reset: () => { progFill.style.width = '0%'; statusLine.textContent = IDLE; jobCountLine.textContent = ''; refreshSel(); } };
       }
