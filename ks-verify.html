@@ -255,6 +255,7 @@
           const has22 = lastCfg && BJ.PRESETS[lastCfg.game].dealer22Push;
           th.appendChild(h('div', { class: 'dstat', text: `爆 ${pct(D.bust)}` }));
           if (has22) th.appendChild(h('div', { class: 'dstat', text: `22點 ${pct(D['22'] || 0)}` }));
+          if (d === 10 || d === 11) th.appendChild(h('div', { class: 'dstat', text: `BJ ${pct(D.BJ || 0)}` })); // 明牌 10／A 才可能湊成 BJ
           th.title = `莊家明牌 ${upLabelOf(d)} 補完的結果（精算）：爆牌${has22 ? '（超過 22）' : ''} ${pct(D.bust)}${has22 ? `、剛好 22 點整桌平手 ${pct(D['22'] || 0)}` : ''}、BJ ${pct(D.BJ || 0)}、17 ${pct(D['17'] || 0)}、18 ${pct(D['18'] || 0)}、19 ${pct(D['19'] || 0)}、20 ${pct(D['20'] || 0)}、21 ${pct(D['21'] || 0)}`;
         }
         return th;
