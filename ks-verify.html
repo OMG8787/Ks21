@@ -28,7 +28,8 @@
     .vt-cell .act { display: inline-block; min-width: 30px; }
     .vt-cell .best { font-weight: 700; color: var(--accent); }
     .vt-cell .na { color: var(--muted); }
-    .vt-cell .dinfo { color: var(--muted); font-size: 11px; }
+    .vt-main th .up { font-size: 14px; }
+    .vt-main th .dstat { font-size: 11px; font-weight: 400; line-height: 1.3; }
     .vt-cell .sim { display: block; font-size: 11px; color: var(--muted); }
     .vt-cell .sim.diff { color: var(--bad); font-weight: 700; }
     .vt-cell .fd { display: block; font-size: 11px; color: #7a5a00; font-weight: 400; }
@@ -182,9 +183,10 @@
       function runAll(cfg) {
         const R = Object.assign({}, BJ.PRESETS[cfg.game]);
         const full = baseComposition(cfg);
-        const rows = { hard: [], soft: [], pair: [] };
+        const rows = { hard: [], soft: [], pair: [], colD: {} }; // colD：每種莊家明牌補完的結果分佈（放在表頭）
         BJ.DEALER_VALS.forEach(d => {
           const { upRank, c10base, D } = columnD(R, full, d);
+          rows.colD[d] = D;
           HARD_ORDER.forEach(t => {
             (rows.hard[t] || (rows.hard[t] = {}))[d] = calcCell(R, c10base, HARD_REP[t].slice(), upRank, { D, isPair: false, firstDraw: isFirstDrawRow('hard', t) });
           });
@@ -212,8 +214,7 @@
           const v = cell[k];
           const isBest = k === cell.best;
           const D = v.dealerD;
-          const dinfo = D ? ` <span class="dinfo" title="投降後莊家如果繼續補牌（精算）：爆牌 ${pct(D.bust)}${D['22'] ? '、22點平手 ' + pct(D['22']) : ''}、BJ ${pct(D.BJ)}">莊爆 ${pct(D.bust)}</span>` : '';
-          return `<span class="act${isBest ? ' best' : ''}" data-cell="${kind}-${key}-${d}" data-act="${k}" title="${ACT_NAME[k]}：精算 勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}${dinfo}${v.fd ? `<span class="fd" title="精算：要牌／加倍補的第一張牌之後，爆牌、還不到 17、落在 17~21 的機率">${fdText(v.fd)}</span>` : ''}<span class="sim" data-sim="${jobKey(kind, key, d, k)}"></span></span>`;
+          return `<span class="act${isBest ? ' best' : ''}" data-cell="${kind}-${key}-${d}" data-act="${k}" title="${ACT_NAME[k]}：精算 勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}${v.fd ? `<span class="fd" title="精算：要牌／加倍補的第一張牌之後，爆牌、還不到 17、落在 17~21 的機率">${fdText(v.fd)}</span>` : ''}<span class="sim" data-sim="${jobKey(kind, key, d, k)}"></span></span>`;
         }).join('<br>');
       }
 
@@ -246,12 +247,25 @@
         });
       }
 
-      function buildTable(title, order, kind, rowsObj) {
+      // 表頭：莊家明牌＋這張明牌補完會爆牌、會停在 22 點（整桌平手）的機率。
+      // 這是整欄共用的數字（精算時只扣掉莊家明牌，跟玩家拿什麼牌幾乎無關），所以放在表頭，不再每格重複
+      function dealerHead(d, D) {
+        const th = h('th', { 'data-d': d }, h('div', { class: 'up', text: upLabelOf(d) }));
+        if (D) {
+          const has22 = lastCfg && BJ.PRESETS[lastCfg.game].dealer22Push;
+          th.appendChild(h('div', { class: 'dstat', text: `爆 ${pct(D.bust)}` }));
+          if (has22) th.appendChild(h('div', { class: 'dstat', text: `22點 ${pct(D['22'] || 0)}` }));
+          th.title = `莊家明牌 ${upLabelOf(d)} 補完的結果（精算）：爆牌${has22 ? '（超過 22）' : ''} ${pct(D.bust)}${has22 ? `、剛好 22 點整桌平手 ${pct(D['22'] || 0)}` : ''}、BJ ${pct(D.BJ || 0)}、17 ${pct(D['17'] || 0)}、18 ${pct(D['18'] || 0)}、19 ${pct(D['19'] || 0)}、20 ${pct(D['20'] || 0)}、21 ${pct(D['21'] || 0)}`;
+        }
+        return th;
+      }
+
+      function buildTable(title, order, kind, rowsObj, colD) {
         const box = h('div', { class: 'panel' });
         const where = h('span', { class: 'vt-where' });
         box.appendChild(h('h3', { style: { marginTop: 0 } }, title, where));
         const tbl = h('table', { class: 'vt-table vt-main' });
-        const head = h('tr', null, h('th', { class: 'corner', text: '玩家 ＼ 莊家' }), BJ.DEALER_VALS.map(d => h('th', { 'data-d': d, text: upLabelOf(d) })));
+        const head = h('tr', null, h('th', { class: 'corner', text: '玩家 ＼ 莊家' }), BJ.DEALER_VALS.map(d => dealerHead(d, colD && colD[d])));
         tbl.appendChild(head);
         order.forEach(key => {
           const tr = h('tr', null, h('td', { class: 'hand', id: `lab-${kind}-${key}`, text: rowLabel(kind, key) }));
@@ -275,10 +289,10 @@
         lastRows = rows; lastCfg = cfg; customRow = null;
         const out = ui.$('result');
         out.innerHTML = '';
-        out.appendChild(h('p', { class: 'muted', text: `精算 370 格耗時 ${ms} 毫秒。每格依序列出合法動作：勝率%／每注EV%（不含和局計入分母的勝率；EV 以原始下注 1 注為基準，加倍時反映 2 倍注的輸贏）。藍色粗體＝這一格精算 EV 最高的動作。投降固定是 0%/-50%，後面的「莊爆」是投降後莊家如果繼續補牌會爆牌的機率。灰色小字是模擬驗算結果（要按上面「開始模擬驗算」才會出現）。` }));
-        out.appendChild(buildTable('硬牌（18 種 × 莊家 10 種 = 180 格）', HARD_ORDER, 'hard', rows.hard));
-        out.appendChild(buildTable('軟牌（9 種 × 莊家 10 種 = 90 格）', SOFT_ORDER, 'soft', rows.soft));
-        out.appendChild(buildTable('對子（10 種 × 莊家 10 種 = 100 格）', PAIR_VALS, 'pair', rows.pair));
+        out.appendChild(h('p', { class: 'muted', text: `精算 370 格耗時 ${ms} 毫秒。每格依序列出合法動作：勝率%／每注EV%（不含和局計入分母的勝率；EV 以原始下注 1 注為基準，加倍時反映 2 倍注的輸贏）。藍色粗體＝這一格精算 EV 最高的動作。投降固定是 0%/-50%。表頭莊家明牌下面的「爆」「22點」是這張明牌補完會爆牌、剛好停在 22 點（Free bet 規則才有：22 點整桌平手，超過 22 才算爆）的機率，整欄共用。灰色小字是模擬驗算結果（要按上面「開始模擬驗算」才會出現）。` }));
+        out.appendChild(buildTable('硬牌（18 種 × 莊家 10 種 = 180 格）', HARD_ORDER, 'hard', rows.hard, rows.colD));
+        out.appendChild(buildTable('軟牌（9 種 × 莊家 10 種 = 90 格）', SOFT_ORDER, 'soft', rows.soft, rows.colD));
+        out.appendChild(buildTable('對子（10 種 × 莊家 10 種 = 100 格）', PAIR_VALS, 'pair', rows.pair, rows.colD));
         simUI.reset();
       }
 
