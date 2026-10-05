@@ -29,6 +29,7 @@
     .vt-cell .na { color: var(--muted); }
     .vt-cell .sim { display: block; font-size: 11px; color: var(--muted); }
     .vt-cell .sim.diff { color: var(--bad); font-weight: 700; }
+    .vt-cell .sim-log-link { margin-left: 4px; text-decoration: none; cursor: pointer; }
     .vt-cell.running { outline: 2px solid var(--accent); }
     .vt-controls input[type=number] { width: 90px; }
     .vt-controls .row { align-items: center; }
@@ -217,13 +218,15 @@
 
       // 跑單一「格子 + 動作」：強制第一個動作，之後照最佳基本策略打到底（跟精算一樣的規則、牌組設定）
       // 每一局都用設定的牌組組成重新洗牌，牌況不會隨著跑的局數累積變化，才能跟精算（固定組成）互相對照
+      const LOG_LIMIT = 50; // 每個「格子＋動作」最多留幾筆局紀錄給人工檢查
       function simulateJob(R, baseCounts, opt, job, N, onChunk, shouldStop) {
         return new Promise(resolve => {
           const upRank = job.d === 11 ? 'A' : String(job.d);
           const shoe = new KSU.Shoe({ counts: baseCounts, penetration: 1 });
           let wins = 0, pushes = 0, losses = 0, netSum = 0, i = 0;
+          const logs = [];
           function tick() {
-            if (shouldStop()) { resolve({ done: i, stopped: true }); return; }
+            if (shouldStop()) { resolve({ done: i, stopped: true, logs }); return; }
             const t0 = Date.now();
             while (i < N && Date.now() - t0 < 25) {
               shoe.shuffle();
@@ -239,18 +242,35 @@
                 rd.act(L[a] ? a : 'stand');
               }
               rd.playDealer();
-              shoe.endRound();
               const net = rd.seats[0].net;
+              if (logs.length < LOG_LIMIT) {
+                logs.push({
+                  dealer: rd.dealer.map(KSU.cardText), dealerOutcome: rd.dealerOutcome(),
+                  hands: rd.seats[0].hands.map(x => ({ cards: x.cards.map(KSU.cardText), total: BJ.handTotal(x.cards), actions: x.actions.slice(), result: x.result, profit: x.profit, note: x.note || '', free: x.freeDouble, freeSplit: x.freeSplit })),
+                  net
+                });
+              }
+              shoe.endRound();
               netSum += net;
               if (net > 1e-9) wins++; else if (net < -1e-9) losses++; else pushes++;
               i++;
             }
             onChunk(i, N, { win: wins / Math.max(1, i), ev: netSum / Math.max(1, i) });
-            if (i >= N) { resolve({ done: i, stopped: false, win: wins / N, ev: netSum / N, wins, pushes, losses }); return; }
+            if (i >= N) { resolve({ done: i, stopped: false, win: wins / N, ev: netSum / N, wins, pushes, losses, logs }); return; }
             setTimeout(tick, 0);
           }
           tick();
         });
+      }
+
+      const RES_LABEL = { W: '勝', L: '負', P: '和' };
+      const OUT_LABEL = { '17': '17', '18': '18', '19': '19', '20': '20', '21': '21', BJ: 'BJ', '22': '22(平手)', bust: '爆牌' };
+      function fmtSimLog(e) {
+        const hands = e.hands.map(x => `[${x.cards.join(' ')}]=${x.total}${x.actions.length ? ' ' + x.actions.map(a => BJ.ACTION_LABEL[a] || a).join('→') : ''}${x.free ? '(免費)' : ''}${x.freeSplit ? '[免費手]' : ''} ` +
+          `<span class="res-${x.result}" style="color:${x.result === 'W' ? '#1a8f4c' : x.result === 'L' ? '#c43c3c' : '#8a6d00'}">${RES_LABEL[x.result] || ''}${x.note ? '(' + ui.esc(x.note) + ')' : ''} ${ui.signed(x.profit, 0)}</span>`
+        ).join('；');
+        const dOut = e.dealerOutcome ? OUT_LABEL[e.dealerOutcome] || e.dealerOutcome : '未補完';
+        return `<div class="log-row">莊家 [${e.dealer.join(' ')}] ${dOut}　${hands}　<b>合計 ${ui.signed(e.net, 0)}</b></div>`;
       }
 
       function buildSimController() {
@@ -296,8 +316,19 @@
               const exact = lastRows[job.kind][job.key][job.d][job.action];
               const diff = Math.abs(r.ev - exact.ev) > 0.01 || Math.abs(r.win - exact.win) > 0.01;
               simSpan.className = 'sim' + (diff ? ' diff' : '');
-              simSpan.textContent = `｜模擬 ${pct(r.win)}/${evPct(r.ev)}（${N.toLocaleString()}局）`;
               simSpan.title = `模擬：勝 ${r.wins.toLocaleString()}、和 ${r.pushes.toLocaleString()}、負 ${r.losses.toLocaleString()}`;
+              simSpan.innerHTML = '';
+              simSpan.appendChild(document.createTextNode(`｜模擬 ${pct(r.win)}/${evPct(r.ev)}（${N.toLocaleString()}局）`));
+              if (r.logs && r.logs.length) {
+                simSpan.appendChild(h('a', {
+                  href: '#', class: 'sim-log-link', text: '🔍',
+                  title: `看其中 ${r.logs.length} 筆實際模擬的局，檢查算得對不對`,
+                  onclick: ev2 => {
+                    ev2.preventDefault(); ev2.stopPropagation();
+                    ui.logViewer(`模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；這次模擬 勝率 ${pct(r.win)}/EV ${evPct(r.ev)}，共 ${N.toLocaleString()} 局，這裡只列前 ${r.logs.length} 筆）`, r.logs.map(fmtSimLog));
+                  }
+                }));
+              }
             }
             jobsDone++;
             const elapsedTotal = (Date.now() - t0) / 1000;
