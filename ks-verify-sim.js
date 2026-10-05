@@ -17,7 +17,9 @@
 
   function newStats() {
     return { rounds: 0, hands: 0, hW: 0, hL: 0, hP: 0, rW: 0, rL: 0, rP: 0, bj: 0, bust: 0, surrender: 0,
-      dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0, acc: new KSU.Acc() };
+      dbl: 0, dblW: 0, dblFree: 0, dblFreeW: 0, splitHands: 0, splitW: 0, even: 0, wagered: 0, net: 0,
+      fdN: 0, fdBust: 0, fdUnder: 0, // 硬 12~20 要牌／加倍：補第一張之後 爆牌／未滿17 的次數
+      acc: new KSU.Acc() };
   }
   function newDealerStats() {
     const D = { rounds: 0 };
@@ -52,6 +54,14 @@
     playPlayers(rd, opt, L => (L[job.action] ? job.action : 'stand'));
     rd.playDealer();
     const seat = rd.seats[0];
+    if (job.firstDraw) {
+      const c3 = seat.hands[0].cards;
+      if (c3.length >= 3) {
+        const t = BJ.handTotal(c3.slice(0, 3));
+        S.fdN++;
+        if (t > 21) S.fdBust++; else if (t < 17) S.fdUnder++;
+      }
+    }
     if (wantLogs && logs.length < LOG_LIMIT) {
       logs.push({
         dealer: rd.dealer.map(KSU.cardText), dealerOutcome: rd.dealerOutcome(),

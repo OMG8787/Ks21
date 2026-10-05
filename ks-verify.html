@@ -31,6 +31,8 @@
     .vt-cell .dinfo { color: var(--muted); font-size: 11px; }
     .vt-cell .sim { display: block; font-size: 11px; color: var(--muted); }
     .vt-cell .sim.diff { color: var(--bad); font-weight: 700; }
+    .vt-cell .fd { display: block; font-size: 11px; color: #7a5a00; font-weight: 400; }
+    .vt-cell .sim .fd.diff { color: var(--bad); font-weight: 700; }
     .vt-cell .sim-log-link { margin-left: 4px; text-decoration: none; cursor: pointer; }
     .vt-cell.running { outline: 2px solid var(--accent); }
     /* 大表格：表格自己捲動，表頭（莊家牌）固定在上面、列名（玩家牌）固定在左邊，滑到哪裡都看得到在哪一行哪一列 */
@@ -153,9 +155,21 @@
           // 投降後莊家如果繼續補牌的結果（精算）：牌收回牌靴的規則下，玩家的牌會回到牌靴，莊家抽牌的組成就只少了明牌
           out.surrender.dealerD = R.returnSettledCards ? opt.D : BJ.dealerDist(KSU.idx10(upRank), c10, R);
         }
+        // 硬 12~20 的要牌／加倍：補的第一張之後會變成怎樣（精算：直接用剩下的牌組比例算；A 在這裡只能算 1）
+        if (opt.firstDraw) {
+          const tot = BJ.handInfo(cards).total;
+          let n = 0, b = 0, u = 0;
+          c10.forEach((c, i) => { n += c; const t = tot + i + 1; if (t > 21) b += c; else if (t < 17) u += c; });
+          const fd = { bust: b / n, under: u / n, mid: (n - b - u) / n };
+          if (out.hit) out.hit.fd = fd;
+          if (out.double) out.double.fd = fd;
+        }
         out.best = e.best;
         return out;
       }
+
+      const isFirstDrawRow = (kind, key) => kind === 'hard' && key >= 12 && key <= 20; // 要多顯示「補第一張」統計的列
+      const fdText = fd => `補1張：爆 ${pct(fd.bust)}｜未滿17 ${pct(fd.under)}｜17~21 ${pct(fd.mid)}`;
 
       function columnD(R, full, d) {
         const upRank = upLabelOf(d);
@@ -172,7 +186,7 @@
         BJ.DEALER_VALS.forEach(d => {
           const { upRank, c10base, D } = columnD(R, full, d);
           HARD_ORDER.forEach(t => {
-            (rows.hard[t] || (rows.hard[t] = {}))[d] = calcCell(R, c10base, HARD_REP[t].slice(), upRank, { D, isPair: false });
+            (rows.hard[t] || (rows.hard[t] = {}))[d] = calcCell(R, c10base, HARD_REP[t].slice(), upRank, { D, isPair: false, firstDraw: isFirstDrawRow('hard', t) });
           });
           SOFT_ORDER.forEach(t => {
             (rows.soft[t] || (rows.soft[t] = {}))[d] = calcCell(R, c10base, SOFT_REP[t].slice(), upRank, { D, isPair: false });
@@ -199,7 +213,7 @@
           const isBest = k === cell.best;
           const D = v.dealerD;
           const dinfo = D ? ` <span class="dinfo" title="投降後莊家如果繼續補牌（精算）：爆牌 ${pct(D.bust)}${D['22'] ? '、22點平手 ' + pct(D['22']) : ''}、BJ ${pct(D.BJ)}">莊爆 ${pct(D.bust)}</span>` : '';
-          return `<span class="act${isBest ? ' best' : ''}" data-cell="${kind}-${key}-${d}" data-act="${k}" title="${ACT_NAME[k]}：精算 勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}${dinfo}<span class="sim" data-sim="${jobKey(kind, key, d, k)}"></span></span>`;
+          return `<span class="act${isBest ? ' best' : ''}" data-cell="${kind}-${key}-${d}" data-act="${k}" title="${ACT_NAME[k]}：精算 勝率 ${pct(v.win)}、每注EV ${evPct(v.ev)}">${ACT_LABEL[k]} ${pct(v.win)}/${evPct(v.ev)}${dinfo}${v.fd ? `<span class="fd" title="精算：要牌／加倍補的第一張牌之後，爆牌、還不到 17、落在 17~21 的機率">${fdText(v.fd)}</span>` : ''}<span class="sim" data-sim="${jobKey(kind, key, d, k)}"></span></span>`;
         }).join('<br>');
       }
 
@@ -274,7 +288,7 @@
         const full = baseComposition(lastCfg);
         BJ.DEALER_VALS.forEach(d => {
           const { upRank, c10base, D } = columnD(R, full, d);
-          const cell = calcCell(R, c10base, cards.slice(), upRank, { D, isPair: kind === 'pair', pv: kind === 'pair' ? key : undefined });
+          const cell = calcCell(R, c10base, cards.slice(), upRank, { D, isPair: kind === 'pair', pv: kind === 'pair' ? key : undefined, firstDraw: isFirstDrawRow(kind, key) });
           lastRows[kind][key][d] = cell;
           const td = ui.$(`td-${kind}-${key}-${d}`);
           if (td) td.innerHTML = cellHtml(kind, key, d, cell);
@@ -304,7 +318,7 @@
       function buildJobs(rows) {
         const jobs = [];
         const add = (kind, key, cards) => BJ.DEALER_VALS.forEach(d => Object.keys(rows[kind][key][d]).forEach(action => {
-          if (action !== 'best' && rows[kind][key][d][action]) jobs.push({ kind, key, d, action, cards });
+          if (action !== 'best' && rows[kind][key][d][action]) jobs.push({ kind, key, d, action, cards, firstDraw: isFirstDrawRow(kind, key) && (action === 'hit' || action === 'double') });
         }));
         HARD_ORDER.forEach(key => { if (key !== 21) add('hard', key, HARD_REP[key]); });
         SOFT_ORDER.forEach(key => { if (key !== 21) add('soft', key, SOFT_REP[key]); });
@@ -597,6 +611,11 @@
             simSpan.className = 'sim' + (diff ? ' diff' : '');
             simSpan.title = `模擬：勝 ${S.rW.toLocaleString()}、和 ${S.rP.toLocaleString()}、負 ${S.rL.toLocaleString()}（局）`;
             simSpan.appendChild(document.createTextNode(`｜模擬 ${pct(win)}/${evPct(ev)}（${N.toLocaleString()}局）`));
+            if (exact.fd && S.fdN) {
+              const sfd = { bust: S.fdBust / S.fdN, under: S.fdUnder / S.fdN, mid: (S.fdN - S.fdBust - S.fdUnder) / S.fdN };
+              const fdDiff = Math.abs(sfd.bust - exact.fd.bust) > 0.01 || Math.abs(sfd.under - exact.fd.under) > 0.01;
+              simSpan.appendChild(h('span', { class: 'fd' + (fdDiff ? ' diff' : ''), title: `模擬：補第一張後 爆牌 ${S.fdBust.toLocaleString()}、未滿17 ${S.fdUnder.toLocaleString()}，共 ${S.fdN.toLocaleString()} 次`, text: '模擬 ' + fdText(sfd) }));
+            }
             title = `模擬紀錄：${handLabel} 對莊家 ${upLabel}，${ACT_NAME[job.action]}（精算 勝率 ${pct(exact.win)}/EV ${evPct(exact.ev)}；模擬 勝率 ${pct(win)}/EV ${evPct(ev)}，共 ${N.toLocaleString()} 局）`;
             statsHtml = fmtStatsTable(S, job.action === 'split');
             rows = r.logs.map(fmtSimLog);
