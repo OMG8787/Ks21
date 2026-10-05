@@ -187,7 +187,7 @@
       const R = this.rules;
       if (!hand || hand.done) return {};
       if (hand.pendingEven) return { even: true, wait: true };
-      if (hand.pendingDA) return { stand: true, surrender: true };
+      if (hand.pendingDA) return { stand: true, surrender: !(R.noSurrenderVsAce && dealerUpValue(this.dealer[0]) === 11) };
       const info = handInfo(hand.cards);
       const two = hand.cards.length === 2;
       const acesLocked = hand.splitAces && R.splitAcesOneCard;

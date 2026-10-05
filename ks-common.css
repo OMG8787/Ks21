@@ -157,6 +157,7 @@ tr.diff-row td { background: #f5f7fb; font-weight: 600; }
 /* 策略的牌況版本：淡色＝照基本、實色有框＝這個版本要改的格子 */
 .strat td.inherit { opacity: .42; font-style: italic; }
 .strat td.ovr { box-shadow: inset 0 0 0 2px #1f2933; }
+.strat td.blocked { text-decoration: line-through; background: repeating-linear-gradient(45deg, rgba(196,60,60,.15), rgba(196,60,60,.15) 4px, transparent 4px, transparent 8px); }
 .ver-hint { background: #eef4ff; border: 1px solid #b9cdf3; border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
 .inherit-demo { opacity: .5; font-style: italic; }
 .ver-select { max-width: 260px; }

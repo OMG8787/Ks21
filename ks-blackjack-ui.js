@@ -1540,12 +1540,16 @@
           const fk = key => (kind === 'even' ? 0 : key);
           const isOvr = (key, d) => { const v = vGet(); return !!(ver && v && C.isFilled(v, kind, fk(key), d)); };
           const codeAt = (key, d) => (isOvr(key, d) ? getCode(vGet(), key, d) : (C.isFilled(s, kind, key, d) ? getCode(s, key, d) : '?'));
-          const cls = (c, key, d) => `cell c-${c === 'Y' ? 'P' : c === 'N' ? '-' : c === '?' ? 'Q' : c}${ver ? (isOvr(key, d) ? ' ovr' : ' inherit') : ''}`;
-          // 版本模式：H → S → … → 回到「照基本」
+          // 莊家明牌 A 時不可投降（規則開關）：硬牌表、對子表都要擋，點格子不能切到投降
+          const blockSurrender = (kind === 'hard' || kind === 'pair') && S.rules.noSurrenderVsAce;
+          const isBlockedCode = (d, code) => blockSurrender && d === 11 && (code === 'Rh' || code === 'Rs' || code === 'R');
+          const cls = (c, key, d) => `cell c-${c === 'Y' ? 'P' : c === 'N' ? '-' : c === '?' ? 'Q' : c}${ver ? (isOvr(key, d) ? ' ovr' : ' inherit') : ''}${isBlockedCode(d, c) ? ' blocked' : ''}`;
+          // 版本模式：H → S → … → 回到「照基本」；莊家A不可投降時，投降的代碼直接跳過
           const nextCode = (c, key, d) => {
-            const cyc = C.CYCLE[kind];
-            if (ver && isOvr(key, d)) { const i = cyc.indexOf(c); return i === cyc.length - 1 ? '=' : cyc[i + 1]; }
-            return c === '?' ? cyc[0] : cyc[(cyc.indexOf(c) + 1) % cyc.length];
+            const cyc = blockSurrender && d === 11 ? C.CYCLE[kind].filter(code => !isBlockedCode(d, code)) : C.CYCLE[kind];
+            if (ver && isOvr(key, d)) { const i = cyc.indexOf(c); return i < 0 ? cyc[0] : i === cyc.length - 1 ? '=' : cyc[i + 1]; }
+            const i = cyc.indexOf(c);
+            return c === '?' || i < 0 ? cyc[0] : cyc[(i + 1) % cyc.length];
           };
           const apply = (key, d, code) => {
             if (!ver) { setCode(s, key, d, code); return; }
@@ -1558,8 +1562,9 @@
             const tds = [];
             cols.forEach(d => {
               const code = codeAt(key, d);
-              const td = h('td', { class: cls(code, key, d), text: code === '?' ? '？' : cellLabel(kind, key, code) });
-              const paint = () => { const c2 = codeAt(key, d); td.className = cls(c2, key, d); td.textContent = c2 === '?' ? '？' : cellLabel(kind, key, c2); };
+              const blockedTitle = c => (isBlockedCode(d, c) ? '⚠️ 規則已設定莊家明牌A時不可投降，這格的投降實際上不會生效' : '');
+              const td = h('td', { class: cls(code, key, d), text: code === '?' ? '？' : cellLabel(kind, key, code), title: blockedTitle(code) });
+              const paint = () => { const c2 = codeAt(key, d); td.className = cls(c2, key, d); td.textContent = c2 === '?' ? '？' : cellLabel(kind, key, c2); td.title = blockedTitle(c2); };
               td.addEventListener('click', () => {
                 if (!editable) { flash('唯讀策略不能修改，請先「複製成新策略」', true); return; }
                 apply(key, d, nextCode(codeAt(key, d), key, d));
