@@ -33,6 +33,19 @@
     .vt-cell .sim.diff { color: var(--bad); font-weight: 700; }
     .vt-cell .sim-log-link { margin-left: 4px; text-decoration: none; cursor: pointer; }
     .vt-cell.running { outline: 2px solid var(--accent); }
+    /* 大表格：表格自己捲動，表頭（莊家牌）固定在上面、列名（玩家牌）固定在左邊，滑到哪裡都看得到在哪一行哪一列 */
+    .vt-scroll { max-height: 78vh; overflow: auto; border: 1px solid #e3e8f1; border-radius: 6px; }
+    .vt-main { border-collapse: separate; border-spacing: 0; }
+    .vt-main th { position: sticky; top: 0; z-index: 2; background: #e9eef7; box-shadow: 0 1px 0 #cfd8e6; }
+    .vt-main td.hand { position: sticky; left: 0; z-index: 1; background: #e9eef7; box-shadow: 2px 0 0 #b9c5d8; min-width: 64px; }
+    .vt-main th.corner { left: 0; z-index: 3; font-size: 11px; }
+    .vt-main td { border-bottom: 1px solid #edf0f5; }
+    .vt-main tr.hl-row td, .vt-main td.hl-col { background: #fff6d1; }
+    .vt-main tr.hl-row td.hand { background: #fff6d1; }
+    .vt-main td.hl-cell { background: #ffe38a !important; }
+    .vt-main th.hl-head, .vt-main td.hand.hl-head { background: var(--accent) !important; color: #fff; }
+    .vt-main td.vt-cell { cursor: pointer; }
+    .vt-where { font-size: 14px; font-weight: 600; color: var(--accent); }
     .vt-controls input[type=number] { width: 90px; }
     .vt-controls .row, .sim-bar .row { align-items: center; }
     .sim-bar { position: sticky; top: 0; z-index: 5; }
@@ -182,22 +195,53 @@
         }).join('<br>');
       }
 
+      // 十字標示：滑鼠移到（或手機點一下）某一格，整列、整欄跟表頭／列名一起標顏色，標題旁邊也寫出「硬 16 × 莊家 6」
+      // 點一下會固定標示（再點同一格取消），滑走也不會跟丟
+      function crosshair(tbl, kind, where) {
+        let pinned = null;
+        function mark(td) {
+          tbl.querySelectorAll('.hl-row, .hl-col, .hl-cell, .hl-head').forEach(x => x.classList.remove('hl-row', 'hl-col', 'hl-cell', 'hl-head'));
+          where.textContent = '';
+          if (!td) return;
+          const d = td.dataset.d, key = +td.dataset.key;
+          td.parentElement.classList.add('hl-row');
+          tbl.querySelectorAll(`td.vt-cell[data-d="${d}"]`).forEach(x => x.classList.add('hl-col'));
+          td.classList.add('hl-cell');
+          const th = tbl.querySelector(`th[data-d="${d}"]`);
+          if (th) th.classList.add('hl-head');
+          const lab = td.parentElement.querySelector('td.hand');
+          if (lab) lab.classList.add('hl-head');
+          where.textContent = `　${pinned ? '📌 ' : '👉 '}${lab ? lab.textContent : rowLabel(kind, key)} × 莊家 ${upLabelOf(+d)}`;
+        }
+        tbl.addEventListener('mouseover', e => { if (pinned) return; const td = e.target.closest('td.vt-cell'); if (td) mark(td); });
+        tbl.addEventListener('mouseleave', () => { if (!pinned) mark(null); });
+        tbl.addEventListener('click', e => {
+          if (e.target.closest('a')) return; // 點 🔍 不影響標示
+          const td = e.target.closest('td.vt-cell');
+          if (!td) return;
+          pinned = pinned === td ? null : td;
+          mark(pinned || td);
+        });
+      }
+
       function buildTable(title, order, kind, rowsObj) {
         const box = h('div', { class: 'panel' });
-        box.appendChild(h('h3', { text: title, style: { marginTop: 0 } }));
-        const tbl = h('table', { class: 'vt-table' });
-        const head = h('tr', null, h('th', { text: '玩家牌' }), BJ.DEALER_VALS.map(d => h('th', { text: upLabelOf(d) })));
+        const where = h('span', { class: 'vt-where' });
+        box.appendChild(h('h3', { style: { marginTop: 0 } }, title, where));
+        const tbl = h('table', { class: 'vt-table vt-main' });
+        const head = h('tr', null, h('th', { class: 'corner', text: '玩家 ＼ 莊家' }), BJ.DEALER_VALS.map(d => h('th', { 'data-d': d, text: upLabelOf(d) })));
         tbl.appendChild(head);
         order.forEach(key => {
           const tr = h('tr', null, h('td', { class: 'hand', id: `lab-${kind}-${key}`, text: rowLabel(kind, key) }));
           BJ.DEALER_VALS.forEach(d => {
-            const td = h('td', { class: 'vt-cell', id: `td-${kind}-${key}-${d}` });
+            const td = h('td', { class: 'vt-cell', id: `td-${kind}-${key}-${d}`, 'data-key': key, 'data-d': d });
             td.innerHTML = cellHtml(kind, key, d, rowsObj[key] && rowsObj[key][d]);
             tr.appendChild(td);
           });
           tbl.appendChild(tr);
         });
-        box.appendChild(h('div', { class: 'table-wrap' }, tbl));
+        box.appendChild(h('div', { class: 'table-wrap vt-scroll' }, tbl));
+        crosshair(tbl, kind, where);
         return box;
       }
 
