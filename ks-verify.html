@@ -48,7 +48,15 @@
     .vt-where { font-size: 14px; font-weight: 600; color: var(--accent); }
     .vt-controls input[type=number] { width: 90px; }
     .vt-controls .row, .sim-bar .row { align-items: center; }
-    .sim-bar { position: sticky; top: 0; z-index: 5; }
+    /* 模擬區塊跟著頁面捲動（不再黏在最上面擋住表格）；跑的時候畫面最下面另外出現一條細的進度列 */
+    .sim-mini { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: none; align-items: center; gap: 10px;
+      padding: 6px 14px; background: rgba(255, 255, 255, .96); box-shadow: 0 -2px 8px rgba(0, 0, 0, .12); font-size: 13px; }
+    .sim-mini.on { display: flex; }
+    .sim-mini .mini-bar { flex: 0 0 140px; height: 8px; background: #e3e8f1; border-radius: 4px; overflow: hidden; }
+    .sim-mini .mini-bar > div { height: 100%; width: 0; background: var(--accent); }
+    .sim-mini .mini-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sim-mini button { flex: none; padding: 2px 10px; }
+    body.sim-running { padding-bottom: 48px; }
     .sim-progress { height: 10px; background: #e3e8f1; border-radius: 6px; overflow: hidden; margin: 6px 0; }
     .sim-progress > div { height: 100%; background: var(--accent); width: 0; transition: width .15s; }
     .sim-status { font-size: 13px; }
@@ -602,7 +610,18 @@
           }
         }
 
+        // 畫面最下面的細進度列：只有跑的時候出現，滑到表格那邊也看得到進度、可以停止
+        const miniFill = h('div');
+        const miniText = h('span', { class: 'mini-text' });
+        const mini = h('div', { class: 'sim-mini' },
+          h('b', { text: '🎲 模擬中' }), h('div', { class: 'mini-bar' }, miniFill), miniText,
+          h('button', { class: 'btn-small btn-ghost', text: '↑ 控制區', onclick: () => box.scrollIntoView({ behavior: 'smooth' }) }),
+          h('button', { class: 'btn-small btn-danger', text: '■ 停止', onclick: () => stopBtn.click() }));
+        document.body.appendChild(mini);
         function lockInputs(on) {
+          mini.classList.toggle('on', on);
+          document.body.classList.toggle('sim-running', on);
+          if (on) { miniFill.style.width = '0%'; miniText.textContent = '準備中…'; }
           startBtn.disabled = on; stopBtn.disabled = !on;
           roundsInput.disabled = lanesSel.disabled = modeSel.disabled = c1Sel.disabled = c2Sel.disabled = upSel.disabled = on;
           rowBoxes.concat(dBoxes).forEach(cb => { cb.disabled = on; });
@@ -669,11 +688,12 @@
             const now = Date.now();
             if (!force && now - lastPaint < 150) return;
             lastPaint = now;
-            progFill.style.width = (roundsDone / totalRounds * 100) + '%';
+            progFill.style.width = miniFill.style.width = (roundsDone / totalRounds * 100) + '%';
             const names = Array.from(runningSet).map(st => `[${handLabelOf(st.job)} vs ${upLabelOf(st.job.d)}] ${ACT_NAME[st.job.action]}`);
             statusLine.textContent = `${roundsDone.toLocaleString()} / ${totalRounds.toLocaleString()} 局（${(roundsDone / totalRounds * 100).toFixed(1)}%）　正在跑：${names.slice(0, 4).join('、')}${names.length > 4 ? ` 等 ${names.length} 個` : ''}`;
             const elapsed = (now - t0) / 1000;
             const eta = roundsDone > 0 ? elapsed / roundsDone * (totalRounds - roundsDone) : NaN;
+            miniText.textContent = `${(roundsDone / totalRounds * 100).toFixed(1)}%　已完成 ${jobsDone} / ${jobs.length} 個動作　預估剩餘 ${fmtTime(eta)}　${names.length ? '正在跑：' + names.slice(0, 2).join('、') : ''}`;
             jobCountLine.textContent = `${scopeLine} 已完成 ${jobsDone} / ${jobs.length} 個動作；已花費 ${fmtTime(elapsed)}；預估剩餘 ${fmtTime(eta)}（用目前平均速度估的；投降的動作比較快，所以會隨著跑到哪裡變動）。`;
           }
 
