@@ -284,7 +284,7 @@
           run(task, onProgress) {
             return new Promise((resolve, reject) => {
               cur = { resolve, reject, onProgress };
-              w.postMessage({ type: 'run', R: task.R, baseCounts: task.baseCounts, job: task.job, n: task.n, wantLogs: task.wantLogs });
+              w.postMessage({ type: 'run', R: task.R, baseCounts: task.baseCounts, job: task.job, n: task.n, wantLogs: task.wantLogs, others: task.others });
             });
           },
           stop() { w.terminate(); finish('resolve', null); }
@@ -295,7 +295,7 @@
         return {
           run(task, onProgress) {
             return new Promise(resolve => {
-              const runner = SIM.makeRunner(task.R, task.baseCounts, task.opt, task.job, task.n, task.wantLogs);
+              const runner = SIM.makeRunner(task.R, task.baseCounts, task.opt, task.job, task.n, task.wantLogs, task.others);
               cur = resolve;
               (function tick() {
                 if (stopped) return;
@@ -364,15 +364,16 @@
 
       const RES_LABEL = { W: '勝', L: '負', P: '和' };
       const OUT_LABEL = { '17': '17', '18': '18', '19': '19', '20': '20', '21': '21', BJ: 'BJ', '22': '22(平手)', bust: '爆牌' };
+      const othersHtml = e => (e.others && e.others.length ? `<br><small class="muted">　其他玩家：${e.others.map((x, i) => `P${i + 2} [${x}]`).join('　')}</small>` : '');
       function fmtSimLog(e) {
         const hands = e.hands.map(x => `[${x.cards.join(' ')}]=${x.total}${x.actions.length ? ' ' + x.actions.map(a => BJ.ACTION_LABEL[a] || a).join('→') : ''}${x.free ? '(免費)' : ''}${x.freeSplit ? '[免費手]' : ''} ` +
           `<span class="res-${x.result}" style="color:${x.result === 'W' ? '#1a8f4c' : x.result === 'L' ? '#c43c3c' : '#8a6d00'}">${RES_LABEL[x.result] || ''}${x.note ? '(' + ui.esc(x.note) + ')' : ''} ${ui.signed(x.profit, 0)}</span>`
         ).join('；');
         const dOut = e.dealerOutcome ? OUT_LABEL[e.dealerOutcome] || e.dealerOutcome : '未補完';
-        return `<div class="log-row">莊家 [${e.dealer.join(' ')}] ${dOut}　${hands}　<b>合計 ${ui.signed(e.net, 0)}</b></div>`;
+        return `<div class="log-row">莊家 [${e.dealer.join(' ')}] ${dOut}　${hands}　<b>合計 ${ui.signed(e.net, 0)}</b>${othersHtml(e)}</div>`;
       }
       function fmtSurrenderLog(e) {
-        return `<div class="log-row">玩家 [${e.player.join(' ')}] 投降　莊家補完 [${e.dealer.join(' ')}]=${e.total} → <b>${DOUT_LABEL[e.out]}</b></div>`;
+        return `<div class="log-row">玩家 [${e.player.join(' ')}] 投降　莊家補完 [${e.dealer.join(' ')}]=${e.total} → <b>${DOUT_LABEL[e.out]}</b>${othersHtml(e)}</div>`;
       }
 
       /* ---------------- 模擬驗算控制（範圍選擇、開始/停止、進度） ---------------- */
@@ -569,6 +570,8 @@
           }
           if (mode === 'main') lanes = [mainLane()];
           const opt = mode === 'main' ? BJ.generateOptimalStrategy(R, baseCounts) : null;
+          // 牌桌人數：自己以外的玩家每局隨機發牌、照最佳基本策略打（人越多每局要算的越多，跑越久）
+          const players = tablePlayers(), others = players - 1;
 
           // 切工作：動作數比通道少的時候（例如只跑一格），把同一個動作的局數拆成幾段分給不同通道，最後合併
           const shards = Math.max(1, Math.min(Math.ceil(want / jobs.length), Math.floor(N / 1000)));
@@ -577,13 +580,13 @@
             const st = { job, parts: [], left: shards, running: 0, done: 0 };
             for (let s = 0; s < shards; s++) {
               const n = Math.floor(N / shards) + (s < N % shards ? 1 : 0);
-              tasks.push({ ji, n, wantLogs: s === 0, R, baseCounts, opt, job });
+              tasks.push({ ji, n, wantLogs: s === 0, R, baseCounts, opt, job, others });
             }
             return st;
           });
           const totalRounds = N * jobs.length;
           const nSur = jobs.filter(j => j.action === 'surrender').length;
-          const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降，只模擬莊家補牌，很快），每個 ${N.toLocaleString()} 局；${lanes.length > 1 ? `多核心 ${lanes.length} 條同時跑` : `單核心`}${note}。`;
+          const scopeLine = `範圍：${sel.label}；共 ${jobs.length} 個「格子＋動作」（其中 ${nSur} 個是投降${others ? '' : '，只模擬莊家補牌，很快'}），每個 ${N.toLocaleString()} 局；牌桌 ${players} 人${others ? `（另外 ${others} 位玩家隨機發牌、照最佳策略打）` : '（只有自己）'}；${lanes.length > 1 ? `多核心 ${lanes.length} 條同時跑` : `單核心`}${note}。`;
           jobCountLine.textContent = scopeLine;
           stopReq = false;
           lockInputs(true);
@@ -661,6 +664,7 @@
         return { box, reset: () => { progFill.style.width = '0%'; statusLine.textContent = IDLE; jobCountLine.textContent = ''; refreshSel(); } };
       }
       let simUI;
+      let tablePlayers = () => 1; // 設定區的「牌桌人數」，模擬開始時讀
 
       function buildControls() {
         const gameSel = h('select', null, [['star22', 'Free bet 21點'], ['american', '美式21點'], ['british', '英式21點']].map(([v, t]) => h('option', { value: v, text: t })));
@@ -681,13 +685,14 @@
           if (b + s >= d * 52) { alert('已出現的大牌＋小牌張數不能超過整個牌靴的張數'); return null; }
           return { game: gameSel.value, decks: d, big: b, small: s };
         };
+        tablePlayers = () => Math.max(1, +playersSel.value || 1);
         const box = h('div', { class: 'panel vt-controls' },
           h('h3', { text: '⚙️ 設定', style: { marginTop: 0 } }),
           h('div', { class: 'row' }, h('label', null, '遊戲規則　', gameSel), h('label', null, '副數　', decks)),
           h('div', { class: 'row' }, h('label', null, '本局已出現大牌(10/J/Q/K/A)　', big), h('label', null, '本局已出現小牌(2-6)　', small)),
           h('div', { class: 'row' }, h('label', null, '牌桌人數　', playersSel), estBtn),
           h('div', { class: 'row' }, goBtn),
-          h('small', { class: 'muted', text: '大牌／小牌已出現的張數，是從整副牌裡直接扣除（模擬這一局已經看過這些牌），計算方式跟「算牌方式」裡的「本局已出現大牌/小牌張數」完全一樣。「依人數估算」只是用平均值幫你猜一個起始值，可以手動改。改這裡的設定後要按「重新精算」。' }));
+          h('small', { class: 'muted', html: '大牌／小牌已出現的張數，是從整副牌裡直接扣除（模擬這一局已經看過這些牌），計算方式跟「算牌方式」裡的「本局已出現大牌/小牌張數」完全一樣。「依人數估算」只是用平均值幫你猜一個起始值，可以手動改。改這裡的設定後要按「重新精算」。<br>牌桌人數：模擬驗算時，自己坐第 1 個位置（最先動作），其他玩家每局隨機發牌、照最佳基本策略打，他們用掉的牌會影響莊家補到的牌；人越多跑越久。精算沒辦法算其他玩家，只能用「依人數估算」先扣掉平均會用掉的牌。⚠️ 兩個一起用會重複扣牌：要看模擬裡其他玩家的影響，大牌／小牌請填 0。' }));
         return { box, cfg };
       }
 
